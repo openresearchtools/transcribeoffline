@@ -1,0 +1,100 @@
+This is where FFmpeg lives. 
+You can use our script or replace it with your own version.
+
+To compile this version you will need 
+1. Xcode Command Line Tools 
+xcode-select --install
+2. Brew
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+3. Pkg-config
+brew install pkg-config
+
+4. Adjust the following to match directory of your app and save it as FFmpeg.sh in Downloads folder.
+You can run it with cd ~/Downloads && chmod +x FFmpeg.sh && ./FFmpeg.sh
+
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build FFmpeg 8.0 (LGPL: no --enable-gpl, no --enable-nonfree) with static libopus 1.5.2.
+# Installs the ffmpeg binary into:
+#   ADJUST DIRECTORY BELOW!!! /Transcribe Offline/content/vendor/ffmpeg
+
+FFMPEG_VER="8.0"
+OPUS_VER="1.5.2"
+
+DEST="/Transcribe Offline/content/vendor/ffmpeg" #!!!!COMPLETE YOUR DIRECTORY!!!
+WORK="${HOME}/ffmpeg-lgpl-${FFMPEG_VER}-opus-${OPUS_VER}"
+PREFIX_OPUS="${WORK}/opus-local"
+
+echo "==> Workspace: $WORK"
+mkdir -p "$WORK" "$(dirname "$DEST")"
+cd "$WORK"
+
+# --- Download exact Opus tarball (as requested) ---
+echo "==> Fetching Opus ${OPUS_VER}…"
+curl -fL -o "opus-${OPUS_VER}.tar.gz" "https://downloads.xiph.org/releases/opus/opus-${OPUS_VER}.tar.gz"
+
+echo "==> Unpacking Opus ${OPUS_VER}…"
+tar xf "opus-${OPUS_VER}.tar.gz"
+cd "opus-${OPUS_VER}"
+
+echo "==> Configuring & building Opus (static)…"
+if [[ -x "./configure" ]]; then
+  ./configure --disable-shared --enable-static --prefix="$PREFIX_OPUS"
+else
+  echo "ERROR: ./configure not found in Opus ${OPUS_VER}. Please install autotools or use a prebuilt opus." >&2
+  exit 1
+fi
+make -j"$(sysctl -n hw.ncpu)"
+make install
+
+# --- Download FFmpeg ---
+cd "$WORK"
+echo "==> Fetching FFmpeg ${FFMPEG_VER}…"
+curl -fL -o "ffmpeg-${FFMPEG_VER}.tar.xz" "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VER}.tar.xz"
+
+echo "==> Unpacking FFmpeg ${FFMPEG_VER}…"
+tar xf "ffmpeg-${FFMPEG_VER}.tar.xz"
+cd "ffmpeg-${FFMPEG_VER}"
+
+# --- Configure & build FFmpeg w/ libopus (LGPL-safe) ---
+echo "==> Configuring FFmpeg (LGPL-safe: NO --enable-gpl, NO --enable-nonfree)…"
+export PKG_CONFIG_PATH="${PREFIX_OPUS}/lib/pkgconfig"
+./configure \
+  --arch=arm64 \
+  --cc=clang \
+  --disable-debug --disable-doc \
+  --disable-ffplay --disable-ffprobe \
+  --enable-static --disable-shared \
+  --enable-pthreads \
+  --pkg-config-flags="--static" \
+  --extra-cflags="-I${PREFIX_OPUS}/include" \
+  --extra-ldflags="-L${PREFIX_OPUS}/lib" \
+  --enable-libopus
+
+echo "==> Building FFmpeg…"
+make -j"$(sysctl -n hw.ncpu)"
+
+echo "==> Installing into your project…"
+cp -f "./ffmpeg" "$DEST"
+chmod +x "$DEST"
+
+echo "==> Verifying the bundled binary…"
+"$DEST" -hide_banner -version
+
+CFG="$("$DEST" -hide_banner -version 2>&1 || true)"
+if grep -q -- '--enable-nonfree' <<<"$CFG"; then
+  echo "ERROR: NONFREE detected — do not ship this."; exit 1
+fi
+if grep -q -- '--enable-gpl' <<<"$CFG"; then
+  echo "ERROR: GPL detected — rebuild without --enable-gpl and GPL-only libs."; exit 1
+fi
+if ! grep -q -- '--enable-libopus' <<<"$CFG"; then
+  echo "WARN: --enable-libopus not present in configuration output. Check build logs." >&2
+fi
+
+echo "OK: FFmpeg is LGPL (no gpl/nonfree) and installed at:"
+echo "   $DEST"
+
+
