@@ -78,6 +78,7 @@ pyannote/wespeaker-voxceleb-resnet34-LM  — CC-BY-4.0                          
 openai/whisper-large-v3-turbo  v3-turbo    MIT License                                    https://huggingface.co/openai/whisper-large-v3-turbo
 mlx-community/whisper-large-v3-turbo       MIT License                                    https://huggingface.co/mlx-community/whisper-large-v3-turbo
 Qwen/Qwen3-8B-MLX-4bit       —             Apache-2.0                                     https://huggingface.co/Qwen/Qwen3-8B-MLX-4bit
+facebook/wav2vec2-base-960h                Apache-2.0                                     https://huggingface.co/facebook/wav2vec2-base-960h
 libavif                     16.3.0        BSD-2-Clause                                                https://github.com/AOMediaCodec/libavif
 libbrotlicommon             1.1.0         MIT License                                                 https://github.com/google/brotli
 libbrotlidec                1.1.0         MIT License                                                 https://github.com/google/brotli
