@@ -1,10 +1,9 @@
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/9b133851-6849-42fd-8d0e-a5cbc60b7e35" width="760" alt="Transcribe Offline">
-</p>
+
 
 # Transcribe Offline
-
-**Transcribe Offline** by <a href="https://openresearchtools.com">openresearchtools.com</a> is a desktop application for **fully local** speech‑to‑text with optional **speaker diarisation** and **word‑level alignment**. It can also create **subtitles** and plug into local LLMs for **summaries** and **light edits** — all on your machine, with no cloud uploads.
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/9b133851-6849-42fd-8d0e-a5cbc60b7e35" width="760" alt="Transcribe Offline">
+</p>**Transcribe Offline** by <a href="https://openresearchtools.com">openresearchtools.com</a> is a desktop application for **fully local** speech‑to‑text with optional **speaker diarisation** and **word‑level alignment**. It can also create **subtitles** and plug into local LLMs for **summaries** and **light edits** — all on your machine, with no cloud uploads.
 
 ---
 
