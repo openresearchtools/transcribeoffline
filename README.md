@@ -19,7 +19,7 @@
 
 ## Platform support
 
-- **macOS (Apple Silicon)** only for now (M1/M2/M3/M4).  
+- **macOS (Apple Silicon)** only for now (M1/M2/M3/M4 - with minimum 16GB of RAM).  
 - **Intel Macs** are **not supported**.  
 - **Windows** version is coming soon!.
 
