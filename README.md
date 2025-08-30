@@ -27,7 +27,7 @@
 ## Option 1) Pre‑compiled app
 
 You can download a pre‑built app here:  
-**Downloads:** https://openresearchtools.com/downloadto/
+**Downloads:** https://openresearchtools.com/transcribe-offline/download-transcribe-offline/ 
 
 We’re a small open‑source team and do not currently hold a paid Apple Developer subscription for notarisation. As a result, macOS may block the first launch.
 
