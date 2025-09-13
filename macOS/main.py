@@ -10,6 +10,7 @@ import os, sys, gc, json, csv, time, queue, shutil, traceback, threading, re, su
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import tkinter.font as tkfont  # NEW: for min-height calculations
 import numpy as np
 import multiprocessing as mp  # subprocess stages
 
@@ -670,141 +671,8 @@ def _proc_align_entry(job: dict, out_q):
 def _proc_diar_entry(job: dict, out_q):
     import traceback, tempfile, time
     try:
-        # ---------- Lightning __version__ runtime shim (for PyInstaller) ----------
-        # Ensures pytorch_lightning.__version__ exists even if dist-info metadata
-        # isn't bundled, preventing AttributeError in pyannote/PL migration utils.
-        try:
-            import pytorch_lightning as pl
-            if not hasattr(pl, "__version__"):
-                try:
-                    try:
-                        from importlib.metadata import version as _pl_version
-                    except Exception:
-                        from importlib_metadata import version as _pl_version  # backport if available
-                except Exception:
-                    _pl_version = None
-                if _pl_version is not None:
-                    try:
-                        pl.__version__ = _pl_version("pytorch-lightning")
-                    except Exception:
-                        pl.__version__ = "0.0.0"
-                else:
-                    pl.__version__ = "0.0.0"
-        except Exception:
-            pass
-        # -------------------------------------------------------------------------
-
-        import torch
-        from pyannote.audio import Pipeline
-        try:
-            import whisperx
-        except Exception:
-            whisperx = None
-        try:
-            import pandas as pd
-        except Exception:
-            pd = None
-
-        media_path = job["media_path"]
-        segments = job["segments"]
-        pya_seg_dir = job["pya_seg_dir"]
-        pya_emb_dir = job["pya_emb_dir"]
-        num_speakers = job["num_speakers"]
-        alignment_on = bool(job.get("alignment_on", False))
-
-        t0 = time.perf_counter()
-        out_q.put(("log", "Diarisation: decode audio (mono16k)"))
-        wav_f32, sr = _ffmpeg_decode_f32_mono_16k_child(media_path)
-
-        tmp_yaml = Path(tempfile.mkdtemp(prefix="pya_")) / "diar_local.yaml"
-        yaml_text = f"""version: 3.1.0
-pipeline:
-  name: pyannote.audio.pipelines.SpeakerDiarization
-  params:
-    clustering: AgglomerativeClustering
-    embedding: "{(Path(pya_emb_dir) / 'pytorch_model.bin').as_posix()}"
-    embedding_batch_size: 32
-    embedding_exclude_overlap: true
-    segmentation: "{(Path(pya_seg_dir) / 'pytorch_model.bin').as_posix()}"
-    segmentation_batch_size: 32
-"""
-        tmp_yaml.write_text(yaml_text, encoding="utf-8")
-        out_q.put(("log", "Diarisation: load pipeline"))
-        pipe = Pipeline.from_pretrained(str(tmp_yaml))
-        try:
-            pipe.instantiate({"clustering": {"method": "centroid", "min_cluster_size": 12, "threshold": 0.7046},
-                              "segmentation": {"min_duration_off": 0.0}})
-        except Exception:
-            pass
-        pipe.to(torch.device("mps"))
-        waveform = torch.from_numpy(np.ascontiguousarray(wav_f32)).unsqueeze(0)
-
-        diar_kwargs = {}
-        ns = (str(num_speakers) or "auto").strip().lower()
-        if ns not in ("", "auto"):
-            try: diar_kwargs["num_speakers"] = int(ns)
-            except Exception: pass
-
-        out_q.put(("log", "Diarisation: running"))
-        with torch.no_grad():
-            diarization = pipe({"waveform": waveform, "sample_rate": 16000}, **diar_kwargs)
-        out_q.put(("log", "Disarisation: assigning speakers"))
-
-        did_word_level = False
-        has_word_ts = any((s.get("words") for s in (segments or []))) and any(
-            any(isinstance(w, dict) and w.get("start") is not None and w.get("end") is not None for w in (s.get("words") or []))
-            for s in (segments or [])
-        )
-
-        if alignment_on and whisperx is not None and pd is not None and has_word_ts:
-            rows = []
-            for (segment, _, speaker) in diarization.itertracks(yield_label=True):
-                rows.append({"start": float(segment.start), "end": float(segment.end), "speaker": str(speaker)})
-            diar_df = pd.DataFrame(rows)
-
-            def _to_minimal_segments_dual(segs):
-                out=[]
-                for s in (segs or []):
-                    try: s_start=float(s.get("start", s.get("s", 0.0)) or 0.0)
-                    except Exception: s_start=0.0
-                    try: s_end=float(s.get("end", s.get("e", s_start)) or s_start)
-                    except Exception: s_end=s_start
-                    if s_end < s_start: s_end = s_start
-                    ms={"start": s_start, "end": s_end, "text": (s.get("text") or ""), "words":[]}
-                    for w in (s.get("words") or []):
-                        if not isinstance(w, dict): continue
-                        ws=w.get("start", w.get("s")); we=w.get("end", w.get("e"))
-                        try:
-                            ws=float(ws) if ws is not None else None
-                            we=float(we) if we is not None else None
-                        except Exception:
-                            ws=None; we=None
-                        if ws is None or we is None: continue
-                        if we < ws: we = ws
-                        token=(w.get("word") or w.get("text") or "").strip()
-                        ms["words"].append({"start": ws, "end": we, "word": token})
-                    out.append(ms)
-                return out
-
-            try:
-                final = whisperx.assign_word_speakers(diar_df, {"segments": _to_minimal_segments_dual(segments)})
-                segments = final["segments"]
-                total_words = sum(len(s.get("words") or []) for s in segments)
-                with_spk = sum(1 for s in segments for w in (s.get("words") or []) if w.get("speaker"))
-                out_q.put(("log", f"Diarisation: word-level speakers {with_spk}/{total_words} words"))
-
-                segments, flips = _smooth_word_speakers(segments, min_run_dur=0.8)
-                out_q.put(("log", f"Diarisation: smoothing flips={flips}"))
-                did_word_level = True
-            except Exception as e:
-                out_q.put(("log", f"Diarisation: whisperx.assign_word_speakers failed: {e}"))
-
-        if not did_word_level:
-            segments = _segment_level_assign_by_overlap(diarization, segments)
-            out_q.put(("log", "Diarisation: segment-level assignment"))
-
-        out_q.put(("log", f"Diarisation: done in {time.perf_counter()-t0:.2f}s"))
-        out_q.put(("segments", segments))
+        # (unchanged; remains in second half)
+        pass
     except Exception:
         out_q.put(("error", traceback.format_exc()))
 
@@ -853,11 +721,16 @@ class App(tk.Tk):
         self._current_media_path = None
         self._play_source = None
 
-        # Preview font controls (NEW)
+        # Preview font controls
         self._preview_font_family = "Consolas"
         self._preview_font_size = tk.IntVar(value=10)
         self._preview_min_font = 8
         self._preview_max_font = 48
+
+        # Edit/Speed UI state
+        self._edit_btn_txt = tk.StringVar(value="Edit transcript…")
+        self._speed_var = tk.StringVar(value="1.0")
+        self._current_speed = 1.0
 
         # Player (sounddevice)
         if not HAS_SD:
@@ -869,13 +742,14 @@ class App(tk.Tk):
         self._build_layout()
         self.after(120, self._poll_queue)
         self._update_align_availability()
+        self.after(0, self._apply_min_sizes)  # enforce min heights after layout
 
         # Hotkeys
         self.bind_all("<Control-space>", self._on_ctrl_space)
         self.bind_all("<Control-Key-space>", self._on_ctrl_space)
         self.bind_all("<Control-Shift-space>", self._on_ctrl_space)
 
-        # Zoom shortcuts (NEW)
+        # Zoom shortcuts
         self.bind_all("<Control-=>", lambda e: self._increase_preview_font())
         self.bind_all("<Control-plus>", lambda e: self._increase_preview_font())
         self.bind_all("<Control-minus>", lambda e: self._decrease_preview_font())
@@ -901,7 +775,7 @@ class App(tk.Tk):
                 data = path.read_text(encoding="utf-8")
             except Exception as e:
                 data = f"Could not read file:\n{path}\n\n{e}"
-            txt.config(state="normal")
+            txt.config("normal")
             txt.delete("1.0", "end")
             # detect [label](target)
             patt = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
@@ -925,7 +799,7 @@ class App(tk.Tk):
                 idx += 1
                 pos = m.end()
             txt.insert("end", data[pos:])
-            txt.config("disabled")  # <-- fixed
+            txt.config("disabled")
 
         def _open_target(target: str):
             # Try to resolve relative to app root
@@ -1028,17 +902,25 @@ class App(tk.Tk):
         ttk.Button(row_out_buttons, text="Select all", command=lambda: self.output_list.selection_set(0, "end")).pack(side="left", padx=6)
         lists_row.add(right_small, weight=1)
 
-        # --- Output editor (merged LLM tools + Output)
-        output_frame = ttk.Labelframe(root, text="Output")
-        output_frame.pack(fill="both", expand=True, **pad)
+        # =================== Center panes: Output (top) + Log (bottom) ===================
+        mid = ttk.Panedwindow(root, orient="vertical")
+        mid.pack(fill="both", expand=True, **pad)
+        self._mid = mid  # store for minsize updates
 
-        bar1 = ttk.Frame(output_frame); bar1.pack(fill="x", padx=4, pady=2)
+        # --- Output editor (merged LLM tools + Output)
+        output_frame = ttk.Labelframe(mid, text="Output")
+        self._output_frame = output_frame
+        output_frame.columnconfigure(0, weight=1)
+
+        # Row 0: LLM params
+        bar1 = ttk.Frame(output_frame); bar1.grid(row=0, column=0, sticky="ew", padx=4, pady=2)
         ttk.Label(bar1, text="Target language:").pack(side="left")
         ttk.Combobox(bar1, textvariable=self.llm_target_lang_var, width=22, values=LLM_LANG_NAMES, state="readonly").pack(side="left", padx=(2,10))
         ttk.Button(bar1, text="Model parameters…", command=self._open_llm_params_dialog).pack(side="left", padx=4)
-        ttk.Checkbutton(bar1, text="Thinking", variable=self.llm_thinking_var).pack(side="left", padx=10)  # NEW
+        ttk.Checkbutton(bar1, text="Thinking", variable=self.llm_thinking_var).pack(side="left", padx=10)
 
-        bar3 = ttk.Frame(output_frame); bar3.pack(fill="x", padx=4, pady=2)
+        # Row 1: LLM actions
+        bar3 = ttk.Frame(output_frame); bar3.grid(row=1, column=0, sticky="ew", padx=4, pady=2)
         self._bar3_widgets = [
             ttk.Button(bar3, text="Translate",  command=self._llm_translate_selected),
             ttk.Button(bar3, text="Summarise",  command=self._llm_summarise_selected),
@@ -1048,13 +930,16 @@ class App(tk.Tk):
         for i,w in enumerate(self._bar3_widgets): w.grid(row=0, column=i, padx=6, pady=2, sticky="w")
         bar3.bind("<Configure>", lambda e: self._reflow_bar3(bar3, e.width))
 
-        # ---- NEW: Zoom bar (text size controls) right after LLM buttons ----
-        zoom_bar = ttk.Frame(output_frame); zoom_bar.pack(fill="x", padx=4, pady=(0,2))
+        # Row 2: Zoom + Edit toggle
+        zoom_bar = ttk.Frame(output_frame); zoom_bar.grid(row=2, column=0, sticky="ew", padx=4, pady=(0,2))
         ttk.Label(zoom_bar, text="Text size:").pack(side="left")
         ttk.Button(zoom_bar, text="A−", width=3, command=self._decrease_preview_font).pack(side="left", padx=(6,2))
         ttk.Button(zoom_bar, text="A+", width=3, command=self._increase_preview_font).pack(side="left", padx=2)
         ttk.Button(zoom_bar, text="Reset", command=self._reset_preview_font).pack(side="left", padx=6)
+        ttk.Separator(zoom_bar, orient="vertical").pack(side="left", padx=10, fill="y")
+        ttk.Button(zoom_bar, textvariable=self._edit_btn_txt, command=self._toggle_edit_mode).pack(side="left", padx=(6,0))
 
+        # Row 3: Preview (grows)
         self.preview = tk.Text(
             output_frame,
             wrap="word",
@@ -1063,11 +948,13 @@ class App(tk.Tk):
             autoseparators=True,
             maxundo=-1
         )
-        self.preview.pack(fill="both", expand=True, padx=4, pady=(0,0))
+        self.preview.grid(row=3, column=0, sticky="nsew", padx=4, pady=(0,0))
+        output_frame.rowconfigure(3, weight=1)  # only preview grows
         self.preview.tag_configure("seg_active", background="#FFF59D")
         self.preview.bind("<<Modified>>", self._on_preview_modified)
         self.preview.bind("<Double-Button-1>", self._on_preview_double_click)
-        # Right-click menu
+
+        # right-click menu
         self._ctx = tk.Menu(self.preview, tearoff=False)
         self._ctx.add_command(label="Cut", command=lambda: self.preview.event_generate("<<Cut>>"))
         self._ctx.add_command(label="Copy", command=lambda: self.preview.event_generate("<<Copy>>"))
@@ -1076,24 +963,63 @@ class App(tk.Tk):
         self._ctx.add_command(label="Select All", command=lambda: (self.preview.tag_add("sel","1.0","end-1c"), self.preview.focus_set()))
         self.preview.bind("<Button-3>", lambda e: (self.preview.focus_set(), self._ctx.tk_popup(e.x_root, e.y_root)))
         self.preview.bind("<Button-2>", lambda e: (self.preview.focus_set(), self._ctx.tk_popup(e.x_root, e.y_root)))
+        # Default to VIEW-ONLY
+        self.preview.config("disabled")
 
-        # --- Player bar (bottom of Output)
-        player_bar = ttk.Frame(output_frame); player_bar.pack(fill="x", padx=4, pady=(4,0))
+        # Row 4: Player bar (with speed on SAME LINE)
+        player_bar = ttk.Frame(output_frame); player_bar.grid(row=4, column=0, sticky="ew", padx=4, pady=(4,0))
+        # Speed (left)
+        ttk.Label(player_bar, text="Speed ×").pack(side="left")
+        sp_ent = ttk.Entry(player_bar, textvariable=self._speed_var, width=5, justify="center")
+        sp_ent.pack(side="left", padx=(4,6))
+        sp_ent.bind("<Return>", lambda e: self._apply_speed_change())
+        sp_ent.bind("<FocusOut>", lambda e: self._apply_speed_change())
+        ttk.Button(player_bar, text="Apply", command=self._apply_speed_change).pack(side="left", padx=(0,8))
+        # Transport (right)
         ttk.Button(player_bar, text="Stop ⏹", command=self._stop_playback).pack(side="right", padx=4)
         self._pause_btn_txt = tk.StringVar(value="Pause ⏸")
         ttk.Button(player_bar, textvariable=self._pause_btn_txt, command=self._toggle_pause).pack(side="right", padx=4)
         ttk.Button(player_bar, text="Play All ▶", command=self._play_all).pack(side="right", padx=4)
 
-        # --- Log
-        log_frame = ttk.Labelframe(root, text="Log")
-        log_frame.pack(fill="both", expand=False, **pad)
+        # --- Log (in lower pane)
+        log_frame = ttk.Labelframe(mid, text="Log")
+        self._log_frame = log_frame
         self.log = tk.Text(log_frame, wrap="word", font=("Consolas", 9), height=6)
-        self.log.pack(fill="both", expand=True)
+        self.log.pack(fill="both", expand=True, padx=6, pady=6)
+
+        # Add panes with initial weights; minsize set in _apply_min_sizes()
+        mid.add(output_frame, weight=3)
+        mid.add(log_frame, weight=1)
 
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(root, textvariable=self.status_var).pack(anchor="w", padx=6, pady=3)
 
         self._on_mode_change()
+
+    # ---- min sizes for panes & rows so bars don't vanish on resize ----
+    def _apply_min_sizes(self):
+        try:
+            # preview: ≥ 8 lines
+            pf = tkfont.Font(font=(self._preview_font_family, self._preview_font_size.get()))
+            line = max(1, pf.metrics("linespace"))
+            preview_min = line * 8 + 8
+            # keep the preview row above this min height
+            try:
+                self._output_frame.rowconfigure(3, minsize=preview_min)
+            except Exception:
+                pass
+            # panes min size (approx add toolbar heights)
+            out_min = preview_min + 140
+            self._mid.paneconfigure(self._output_frame, minsize=out_min)
+        except Exception:
+            pass
+        try:
+            # log: ≥ 2 lines
+            lf = tkfont.Font(font=("Consolas", 9))
+            log_min = lf.metrics("linespace") * 2 + 16
+            self._mid.paneconfigure(self._log_frame, minsize=log_min)
+        except Exception:
+            pass
 
     def _open_llm_params_dialog(self):
         win = tk.Toplevel(self); win.title("Model parameters"); win.transient(self); win.grab_set()
@@ -1176,6 +1102,9 @@ class App(tk.Tk):
                 content = f.read()
             self._stop_playback()
             self._current_preview_path = path
+            # Always return to VIEW-ONLY on selection
+            self._edit_btn_txt.set("Edit transcript…")
+            self.preview.config("disabled")
             self._set_preview_text(content)
             self._parse_preview_segments()
             self._auto_add_and_bind_media_for_output(path)
@@ -1185,16 +1114,21 @@ class App(tk.Tk):
     def _set_preview_text(self, text: str):
         self._preview_prog_update = True
         try:
+            prev_state = self.preview.cget("state")
+            self.preview.config("normal")
             self.preview.delete("1.0","end")
             self.preview.insert("1.0", text)
             self.preview.edit_modified(False)
+            # restore previous state (default view-only)
+            self.preview.config(prev_state)
         finally:
             self._preview_prog_update = False
 
-    # ---- NEW: preview font helpers ----
+    # ---- preview font helpers ----
     def _apply_preview_font(self):
         try:
             self.preview.configure(font=(self._preview_font_family, self._preview_font_size.get()))
+            self._apply_min_sizes()
         except Exception as e:
             self._post("log", f"Font apply failed: {e}")
 
@@ -1211,6 +1145,7 @@ class App(tk.Tk):
     def _reset_preview_font(self):
         self._preview_font_size.set(10)
         self._apply_preview_font()
+
 #BREAK PART1
     def _post(self, kind, payload): self.msg_q.put((kind, payload))
 
@@ -1223,6 +1158,9 @@ class App(tk.Tk):
                 elif kind=="status":
                     self.status_var.set(str(payload))
                 elif kind=="preview":
+                    # force view-only when preview text is replaced programmatically
+                    self._edit_btn_txt.set("Edit transcript…")
+                    self.preview.config("disabled")
                     self._set_preview_text(str(payload))
                     try: self._parse_preview_segments()
                     except Exception: pass
@@ -1232,6 +1170,9 @@ class App(tk.Tk):
                     try:
                         with open(p,"r",encoding="utf-8") as f: txt=f.read()
                         self._current_preview_path = p
+                        # force view-only on file load
+                        self._edit_btn_txt.set("Edit transcript…")
+                        self.preview.config("disabled")
                         self._set_preview_text(txt)
                         self._parse_preview_segments()
                         self._auto_add_and_bind_media_for_output(p)
@@ -1246,11 +1187,115 @@ class App(tk.Tk):
         except queue.Empty: pass
         self.after(120, self._poll_queue)
 
+    # --------------------------- Edit mode: only .edited* can be modified ---------------------------
+    def _toggle_edit_mode(self):
+        if not self._current_preview_path:
+            messagebox.showinfo("No file", "Select a transcript in Output files first.")
+            return
+
+        path = Path(self._current_preview_path)
+        is_edited = ".edited" in path.stem
+
+        # If already editing an edited* file → switch back to view-only
+        if self.preview.cget("state") == "normal":
+            self.preview.config("disabled")
+            self._edit_btn_txt.set("Edit transcript…")
+            return
+
+        # If current file is an edited* → enable editing directly
+        if is_edited:
+            self.preview.config("normal")
+            self._edit_btn_txt.set("Done editing (lock)")
+            return
+
+        # Current file is original → search for existing edited siblings
+        base = path.with_suffix("")  # remove extension
+        ext = path.suffix
+        folder = path.parent
+
+        # Find name.edited{,2,3,...}.ext
+        edited_candidates = []
+        for p in folder.iterdir():
+            if not p.is_file(): continue
+            if p.suffix.lower() != ext.lower(): continue
+            st = p.stem  # e.g., "name.edited2"
+            if st == f"{base.stem}.edited" or (st.startswith(f"{base.stem}.edited") and st[len(f"{base.stem}.edited"):].isdigit()):
+                edited_candidates.append(p)
+        edited_candidates.sort(key=lambda p: (p.stem, p.suffix))
+
+        def _open_path(pp: Path):
+            try:
+                with open(pp, "r", encoding="utf-8") as f: txt = f.read()
+            except Exception as e:
+                self._post("log", f"Open failed: {e}"); return
+            self._current_preview_path = str(pp)
+            if self._current_preview_path not in self.output_files:
+                self.output_files.append(self._current_preview_path)
+                self.output_list.insert("end", self._current_preview_path)
+            self._set_preview_text(txt)
+            self._parse_preview_segments()
+            self.preview.config("normal")
+            self._edit_btn_txt.set("Done editing (lock)")
+            try: self._auto_add_and_bind_media_for_output(str(pp))
+            except Exception: pass
+
+        # If found at least one edited → ask user to pick or create new
+        if edited_candidates:
+            win = tk.Toplevel(self); win.title("Choose edited transcript"); win.transient(self); win.grab_set()
+            ttk.Label(win, text="I found edited versions of this file. Choose one to continue editing or create a new edited copy:").pack(anchor="w", padx=10, pady=(10,6))
+            lb = tk.Listbox(win, height=min(6, len(edited_candidates)))
+            for pp in edited_candidates: lb.insert("end", str(pp.name))
+            lb.pack(fill="x", expand=True, padx=10, pady=6)
+            btns = ttk.Frame(win); btns.pack(fill="x", padx=10, pady=(0,10))
+
+            def on_open():
+                sel = lb.curselection()
+                if not sel:
+                    messagebox.showerror("Select", "Pick an edited file from the list.")
+                    return
+                pp = edited_candidates[sel[0]]
+                win.destroy()
+                _open_path(pp)
+
+            def on_new():
+                # next free suffix
+                n = 1
+                while True:
+                    cand = folder / f"{base.stem}.edited{'' if n==1 else n}{ext}"
+                    if not cand.exists(): break
+                    n += 1
+                try:
+                    text = self.preview.get("1.0","end-1c")
+                    with open(cand, "w", encoding="utf-8") as f: f.write(text)
+                except Exception as e:
+                    self._post("log", f"Create edited failed: {e}"); win.destroy(); return
+                win.destroy()
+                _open_path(cand)
+
+            ttk.Button(btns, text="Open selected", command=on_open).pack(side="left")
+            ttk.Button(btns, text="Create new edited copy", command=on_new).pack(side="right")
+            return
+
+        # No edited found → create first edited copy
+        first = folder / f"{base.stem}.edited{ext}"
+        try:
+            text = self.preview.get("1.0","end-1c")
+            with open(first, "w", encoding="utf-8") as f: f.write(text)
+        except Exception as e:
+            self._post("log", f"Create edited failed: {e}"); return
+        _open_path(first)
+
     # --------------------------- Preview editing + autosave ---------------------------
     def _on_preview_modified(self, _evt=None):
+        # Only autosave user edits when editing an .edited* file and state is 'normal'
         if self._preview_prog_update:
             self.preview.edit_modified(False); return
         if not self._current_preview_path:
+            self.preview.edit_modified(False); return
+        if self.preview.cget("state") != "normal":
+            self.preview.edit_modified(False); return
+        if ".edited" not in Path(self._current_preview_path).stem:
+            # Do not autosave originals anymore
             self.preview.edit_modified(False); return
         if self._save_after_id:
             try: self.after_cancel(self._save_after_id)
@@ -1261,16 +1306,19 @@ class App(tk.Tk):
         self._save_after_id = None
         if not self._current_preview_path:
             self.preview.edit_modified(False); return
-        base, ext = os.path.splitext(self._current_preview_path)
-        if base.endswith(".edited"): out_path = f"{base}{ext}"
-        else: out_path = f"{base}.edited{ext}"
+        # Write BACK to the currently-open edited file only
+        cur = Path(self._current_preview_path)
+        if ".edited" not in cur.stem:
+            self.preview.edit_modified(False); return
+        out_path = str(cur)
         try:
             content = self.preview.get("1.0","end-1c")
             with open(out_path, "w", encoding="utf-8") as f: f.write(content)
             if out_path not in self.output_files:
                 self.output_files.append(out_path); self.output_list.insert("end", out_path)
             self._post("log", f"[Output] Autosaved edits → {out_path}")
-            self._parse_preview_segments()
+            try: self._parse_preview_segments()
+            except Exception: pass
         except Exception as e:
             self._post("log", f"[Output] Autosave failed: {e}")
         finally:
@@ -1485,7 +1533,7 @@ class App(tk.Tk):
         if self._active_seg_idx is not None:
             self._set_active_highlight(None)
 
-    # --------------------------- Auto media binding + normalized WAV ---------------------------
+    # --------------------------- Auto media binding + normalized/speed WAV ---------------------------
     _MEDIA_EXTS = (".mp3",".wav",".m4a",".flac",".ogg",".aac",".wma",".webm",".mp4",".mkv",".mov",".avi")
     _OUT_EXTS = (".json",".txt",".csv",".srt",".vtt")
 
@@ -1499,8 +1547,8 @@ class App(tk.Tk):
             if Path(m).stem == stem:
                 self._current_media_path = m
                 try:
-                    self._play_source = self._prepare_normalised_wav(m)
-                    if self._sd: self._sd.load(self._play_source)
+                    # Preload normalized base; actual playback loads speed-specific
+                    _ = self._prepare_normalised_wav(m)
                 except Exception as e: self._post("log", f"[Player] Normalise failed: {e}")
                 return
         try:
@@ -1512,8 +1560,7 @@ class App(tk.Tk):
                         self.media_files.append(self._current_media_path)
                         self.media_list.insert("end", self._current_media_path)
                     try:
-                        self._play_source = self._prepare_normalised_wav(self._current_media_path)
-                        if self._sd: self._sd.load(self._play_source)
+                        _ = self._prepare_normalised_wav(self._current_media_path)
                     except Exception as e: self._post("log", f"[Player] Normalise failed: {e}")
                     return
         except Exception:
@@ -1522,6 +1569,11 @@ class App(tk.Tk):
     def _normalized_wav_path(self, media_path: str) -> str:
         p = Path(media_path)
         return str(p.with_suffix(".norm.wav"))
+
+    def _speed_wav_path(self, media_path: str, speed: float) -> str:
+        p = Path(media_path)
+        # Use clean suffix like .norm.x1.25.wav
+        return str(p.with_suffix(f".norm.x{speed:.2f}.wav"))
 
     def _prepare_normalised_wav(self, media_path: str) -> str:
         """Create/refresh a PCM 16-bit 48kHz stereo WAV next to source."""
@@ -1544,23 +1596,87 @@ class App(tk.Tk):
             subprocess.run(cmd, check=True)
         return out
 
-    # --------------------------- Media playback (sounddevice persistent) ---------------------------
+    def _prepare_playback_wav(self, media_path: str, speed: float) -> str:
+        """Return path to WAV at requested speed. Uses normalized base + atempo filters."""
+        base = self._prepare_normalised_wav(media_path)
+        s = float(speed)
+        if abs(s - 1.0) < 1e-3:
+            return base
+        # Clamp to ffmpeg atempo supported range per filter (0.5..2.0); we chain if needed, but we clamp UI to 0.5..2.0 anyway.
+        s = max(0.5, min(2.0, s))
+        out = self._speed_wav_path(media_path, s)
+        src = Path(base); dst = Path(out)
+        need = True
+        try:
+            if dst.exists():
+                need = (dst.stat().st_mtime < src.stat().st_mtime) or (dst.stat().st_size < 16_000)
+        except Exception:
+            need = True
+        if need:
+            ff = ffmpeg_path()
+            # Build atempo chain (just one stage because s is clamped)
+            filt = f"atempo={s:.6f}"
+            cmd = [ff, "-hide_banner", "-loglevel", "error", "-nostdin",
+                   "-i", base,
+                   "-filter:a", filt,
+                   "-vn", "-c:a", "pcm_s16le", out]
+            self._post("log", f"[Player] Preparing speed {s:.2f}× → {out}")
+            subprocess.run(cmd, check=True)
+        return out
+
+    # --------------------------- Media playback (speed-aware) ---------------------------
+    def _apply_speed_change(self):
+        # Parse + clamp; update field to effective value
+        try:
+            new_s = float(self._speed_var.get().strip().lower().replace("x",""))
+        except Exception:
+            messagebox.showerror("Invalid speed", "Enter a number like 0.75, 1.0, 1.25, 1.5, or 2.0")
+            self._speed_var.set(f"{self._current_speed:.2f}")
+            return
+        new_s = max(0.5, min(2.0, new_s))
+        self._speed_var.set(f"{new_s:.2f}")
+        old_s = self._current_speed
+        self._current_speed = new_s
+
+        if not (HAS_SD and self._sd and self._ensure_media_bound()):
+            return
+
+        try:
+            # Map to equivalent original time then re-load new speed file
+            t_play = float(self._sd.current_time())
+            t_orig = t_play * max(0.001, old_s)
+            new_start = t_orig / max(0.001, new_s)
+
+            wav = self._prepare_playback_wav(self._current_media_path, self._current_speed)
+            self._sd.load(wav)
+
+            # Resume at mapped position if we were playing; otherwise stay paused
+            if not self._paused:
+                self._post("log", f"[Player] speed {new_s:.2f}× • {Path(wav).name} @ {new_start:.3f}s")
+                self._sd.play(new_start)
+                self._pause_btn_txt.set("Pause CTRL+SPACE ⏸")
+                self._tick_player()
+            else:
+                self._post("log", f"[Player] speed ready {new_s:.2f}×; press Play")
+        except Exception as e:
+            self._post("log", f"[Player] speed change failed: {e}")
+
     def _play_all(self):
         if not HAS_SD or not self._sd:
             _dep_missing("sounddevice soundfile", "Audio playback"); return
         if not self._ensure_media_bound(): return
         try:
-            self._play_source = self._prepare_normalised_wav(self._current_media_path)
-            self._sd.load(self._play_source)
+            wav = self._prepare_playback_wav(self._current_media_path, self._current_speed)
+            self._sd.load(wav)
         except Exception as e:
-            self._post("log", f"[Player] Normalise/load failed: {e}"); return
-        self._post("log", f"[Player] play • {self._play_source} @ 0.000s")
+            self._post("log", f"[Player] Prepare/load failed: {e}"); return
+        self._post("log", f"[Player] play • {wav} @ 0.000s")
         try:
             self._sd.play(0.0)
         except Exception as e:
             self._post("log", f"[Player] start failed: {e}"); return
         self._paused = False
-        self._pause_btn_txt.set("Pause ⏸")
+        self._pause_btn_txt.set("Pause CTRL+SPACE ⏸")
         self._tick_player()
 
     def _play_from(self, start_sec: float):
@@ -1568,13 +1684,15 @@ class App(tk.Tk):
             _dep_missing("sounddevice soundfile", "Audio playback"); return
         if not self._ensure_media_bound(): return
         try:
-            self._play_source = self._prepare_normalised_wav(self._current_media_path)
-            self._sd.load(self._play_source)
+            wav = self._prepare_playback_wav(self._current_media_path, self._current_speed)
+            self._sd.load(wav)
         except Exception as e:
-            self._post("log", f"[Player] Normalise/load failed: {e}"); return
-        self._post("log", f"[Player] play • {self._play_source} @ {start_sec:.3f}s")
+            self._post("log", f"[Player] Prepare/load failed: {e}"); return
+        # Map original-start to playback-start by dividing by speed
+        pb_start = float(start_sec) / max(0.001, self._current_speed)
+        self._post("log", f"[Player] play • {Path(wav).name} @ {pb_start:.3f}s (orig {start_sec:.3f}s)")
         try:
-            self._sd.play(float(start_sec))
+            self._sd.play(pb_start)
         except Exception as e:
             self._post("log", f"[Player] start failed: {e}"); return
         self._paused = False
@@ -1619,8 +1737,10 @@ class App(tk.Tk):
         if not (self._sd and not self._paused):
             return
         try:
-            t = float(self._sd.current_time())
-            self._highlight_for_time(t)
+            t_play = float(self._sd.current_time())
+            # Convert playback timeline → original timeline for highlighting
+            t_orig = t_play * max(0.001, self._current_speed)
+            self._highlight_for_time(t_orig)
             if self._sd.ended():
                 self._stop_playback(); return
             self._player_tick_id = self.after(100, self._tick_player)
@@ -2160,6 +2280,147 @@ class App(tk.Tk):
             self._post("add_output", out_path)
         except Exception as e:
             self._llm_log(f"Autosave failed: {e}")
+
+# --------------------------- Diarization process (alignment-aware) ---------------------------
+def _proc_diar_entry(job: dict, out_q):
+    import traceback, tempfile, time
+    try:
+        # ---------- Lightning __version__ runtime shim ----------
+        try:
+            import pytorch_lightning as pl
+            if not hasattr(pl, "__version__"):
+                try:
+                    try:
+                        from importlib.metadata import version as _pl_version
+                    except Exception:
+                        from importlib_metadata import version as _pl_version
+                except Exception:
+                    _pl_version = None
+                if _pl_version is not None:
+                    try:
+                        pl.__version__ = _pl_version("pytorch-lightning")
+                    except Exception:
+                        pl.__version__ = "0.0.0"
+                else:
+                    pl.__version__ = "0.0.0"
+        except Exception:
+            pass
+        # -------------------------------------------------------
+
+        import torch
+        from pyannote.audio import Pipeline
+        try:
+            import whisperx
+        except Exception:
+            whisperx = None
+        try:
+            import pandas as pd
+        except Exception:
+            pd = None
+
+        media_path   = job["media_path"]
+        segments     = job["segments"]
+        pya_seg_dir  = job["pya_seg_dir"]
+        pya_emb_dir  = job["pya_emb_dir"]
+        num_speakers = job["num_speakers"]
+        alignment_on = bool(job.get("alignment_on", False))
+
+        t0 = time.perf_counter()
+        out_q.put(("log", "Diarisation: decode audio (mono16k)"))
+        wav_f32, sr = _ffmpeg_decode_f32_mono_16k_child(media_path)
+
+        tmp_yaml = Path(tempfile.mkdtemp(prefix="pya_")) / "diar_local.yaml"
+        yaml_text = f"""version: 3.1.0
+pipeline:
+  name: pyannote.audio.pipelines.SpeakerDiarization
+  params:
+    clustering: AgglomerativeClustering
+    embedding: "{(Path(pya_emb_dir) / 'pytorch_model.bin').as_posix()}"
+    embedding_batch_size: 32
+    embedding_exclude_overlap: true
+    segmentation: "{(Path(pya_seg_dir) / 'pytorch_model.bin').as_posix()}"
+    segmentation_batch_size: 32
+"""
+        tmp_yaml.write_text(yaml_text, encoding="utf-8")
+        out_q.put(("log", "Diarisation: load pipeline"))
+        pipe = Pipeline.from_pretrained(str(tmp_yaml))
+        try:
+            pipe.instantiate({"clustering": {"method": "centroid", "min_cluster_size": 12, "threshold": 0.7046},
+                              "segmentation": {"min_duration_off": 0.0}})
+        except Exception:
+            pass
+        pipe.to(torch.device("mps"))
+        waveform = torch.from_numpy(np.ascontiguousarray(wav_f32)).unsqueeze(0)
+
+        diar_kwargs = {}
+        ns = (str(num_speakers) or "auto").strip().lower()
+        if ns not in ("", "auto"):
+            try: diar_kwargs["num_speakers"] = int(ns)
+            except Exception: pass
+
+        out_q.put(("log", "Diarisation: running"))
+        with torch.no_grad():
+            diarization = pipe({"waveform": waveform, "sample_rate": 16000}, **diar_kwargs)
+        out_q.put(("log", "Disarisation: assigning speakers"))
+
+        did_word_level = False
+        has_word_ts = any((s.get("words") for s in (segments or []))) and any(
+            any(isinstance(w, dict) and w.get("start") is not None and w.get("end") is not None for w in (s.get("words") or []))
+            for s in (segments or [])
+        )
+
+        # Only attempt word-level assignment if BOTH alignment and diarization are in use
+        if alignment_on and whisperx is not None and pd is not None and has_word_ts:
+            rows = []
+            for (segment, _, speaker) in diarization.itertracks(yield_label=True):
+                rows.append({"start": float(segment.start), "end": float(segment.end), "speaker": str(speaker)})
+            diar_df = pd.DataFrame(rows)
+
+            def _to_minimal_segments_dual(segs):
+                out=[]
+                for s in (segs or []):
+                    try: s_start=float(s.get("start", s.get("s", 0.0)) or 0.0)
+                    except Exception: s_start=0.0
+                    try: s_end=float(s.get("end", s.get("e", s_start)) or s_start)
+                    except Exception: s_end=s_start
+                    if s_end < s_start: s_end = s_start
+                    ms={"start": s_start, "end": s_end, "text": (s.get("text") or ""), "words":[]}
+                    for w in (s.get("words") or []):
+                        if not isinstance(w, dict): continue
+                        ws=w.get("start", w.get("s")); we=w.get("end", w.get("e"))
+                        try:
+                            ws=float(ws) if ws is not None else None
+                            we=float(we) if we is not None else None
+                        except Exception:
+                            ws=None; we=None
+                        if ws is None or we is None: continue
+                        if we < ws: we = ws
+                        token=(w.get("word") or w.get("text") or "").strip()
+                        ms["words"].append({"start": ws, "end": we, "word": token})
+                    out.append(ms)
+                return out
+
+            try:
+                final = whisperx.assign_word_speakers(diar_df, {"segments": _to_minimal_segments_dual(segments)})
+                segments = final["segments"]
+                total_words = sum(len(s.get("words") or []) for s in segments)
+                with_spk = sum(1 for s in segments for w in (s.get("words") or []) if w.get("speaker"))
+                out_q.put(("log", f"Diarisation: word-level speakers {with_spk}/{total_words} words"))
+
+                segments, flips = _smooth_word_speakers(segments, min_run_dur=0.8)
+                out_q.put(("log", f"Diarisation: smoothing flips={flips}"))
+                did_word_level = True
+            except Exception as e:
+                out_q.put(("log", f"Diarisation: whisperx.assign_word_speakers failed: {e}"))
+
+        if not did_word_level:
+            segments = _segment_level_assign_by_overlap(diarization, segments)
+            out_q.put(("log", "Diarisation: segment-level assignment"))
+
+        out_q.put(("log", f"Diarisation: done in {time.perf_counter()-t0:.2f}s"))
+        out_q.put(("segments", segments))
+    except Exception:
+        out_q.put(("error", traceback.format_exc()))
 
 # --------------------------- Tkinter compatibility patch (minor) ---------------------------
 def _patch_tk_config():
