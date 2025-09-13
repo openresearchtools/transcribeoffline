@@ -2036,10 +2036,11 @@ App._run_batch = _run_batch
 App._llm_run_over_outputs = _llm_run_over_outputs
 
 # --------------------------- Entrypoint ---------------------------
+
 def _load_icon_if_present(app: tk.Tk):
     try:
         ico = CONTENT / "AppIcon.ico"
-        if sys.platform.startswith("win") and ico.exists():
+        if ico.exists():
             app.iconbitmap(default=str(ico))
         else:
             png = CONTENT / "AppIcon.png"
@@ -2050,21 +2051,36 @@ def _load_icon_if_present(app: tk.Tk):
         pass
 
 def main():
+    # Make sure ffmpeg path is resolved (no noisy logging)
     try:
-        _ = ffmpeg_path()  # ensure available; no verbose logging
+        _ = ffmpeg_path()
     except SystemExit:
         return
     except Exception:
         pass
+
     app = App()
     _load_icon_if_present(app)
     app.mainloop()
 
 if __name__ == "__main__":
+    # IMPORTANT for Windows + PyInstaller to avoid a duplicate GUI in child processes
+    try:
+        import multiprocessing as mp, sys
+        mp.freeze_support()                 # lets the spawned child init without running GUI
+        mp.set_executable(sys.executable)   # ensure children use the frozen EXE
+        mp.set_start_method("spawn", force=True)
+    except Exception:
+        pass
+
     try:
         main()
     except Exception:
         try:
+            from tkinter import messagebox
+            import traceback
             messagebox.showerror("Fatal error", traceback.format_exc())
         except Exception:
+            import traceback, sys
             print(traceback.format_exc(), file=sys.stderr)
+
