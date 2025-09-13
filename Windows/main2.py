@@ -1293,13 +1293,14 @@ def _proc_transcribe_entry(job: dict, out_q):
     Single-process, single-stream transcription.
     - faster-whisper on CPU with int8
     - cpu_threads from _recommended_threads()
-    - num_workers = 1 (no parallel worker pool)
+    - num_workers = 1 (NO parallel worker pool)
     """
     try:
         from faster_whisper import WhisperModel
         media_path=job["media_path"]; model_dir=job["whisper_dir"]; lang_code=job["lang_code"]
 
         threads, interop = _recommended_threads()
+        # Set BLAS/OMP caps in child for consistency
         os.environ["OMP_NUM_THREADS"]      = str(threads)
         os.environ["MKL_NUM_THREADS"]      = str(threads)
         os.environ["OPENBLAS_NUM_THREADS"] = str(threads)
@@ -1312,7 +1313,7 @@ def _proc_transcribe_entry(job: dict, out_q):
             device="cpu",
             compute_type="int8",
             cpu_threads=threads,
-            num_workers=1
+            num_workers=1   # IMPORTANT: single job at a time, no worker pool
         )
 
         out_q.put(("log","[Transcribe] start"))
@@ -1420,10 +1421,12 @@ def _segments_sanitize_word_ts(segments):
 def _proc_align_entry(job: dict, out_q):
     """
     WhisperX alignment on CPU, single process.
+    No 'workers' parameter is used here; thread parallelism is via Torch.
     """
     try:
         t, io = _recommended_threads()
         _set_torch_threads(t, io)
+        # mirror BLAS/OMP caps
         os.environ["OMP_NUM_THREADS"]      = str(t)
         os.environ["MKL_NUM_THREADS"]      = str(t)
         os.environ["OPENBLAS_NUM_THREADS"] = str(t)
@@ -1523,9 +1526,72 @@ def _smooth_word_speakers(segments, min_run_dur: float=0.8) -> tuple[list, int]:
         if totals: s["speaker"]=max(totals.items(), key=lambda kv: kv[1])[0]
     return segments, flips_total
 
+# --- NEW: diarization turn smoothing to remove tiny A-B-A islands and glue near-touching turns ---
+def _merge_adjacent_same_speaker(rows, glue_tol: float = 0.05):
+    """Merge same-speaker rows that overlap or nearly touch (<= glue_tol)."""
+    if not rows: return []
+    rows = sorted(rows, key=lambda r: (r["start"], r["end"]))
+    out = [dict(rows[0])]
+    for r in rows[1:]:
+        last = out[-1]
+        if r["speaker"] == last["speaker"] and r["start"] <= last["end"] + glue_tol:
+            last["end"] = max(last["end"], r["end"])
+        else:
+            out.append(dict(r))
+    return out
+
+def _collapse_islands(rows, island_tol: float = 0.18):
+    """
+    Collapse A–B–A where B is a short 'island' (< island_tol). Also collapses
+    short first/last islands to their neighbor.
+    """
+    if len(rows) <= 1: return rows
+    out = [dict(rows[0])]
+    for i in range(1, len(rows)-1):
+        prev = out[-1]
+        cur  = rows[i]
+        nxt  = rows[i+1]
+        cur_dur = max(0.0, cur["end"] - cur["start"])
+        if cur_dur < island_tol and prev["speaker"] == nxt["speaker"] != cur["speaker"]:
+            prev["end"] = nxt["start"]
+            continue
+        out.append(dict(cur))
+    out.append(dict(rows[-1]))
+
+    if len(out) >= 2:
+        first = out[0]; second = out[1]
+        if (first["end"] - first["start"]) < island_tol and first["speaker"] != second["speaker"]:
+            second["start"] = min(second["start"], first["start"])
+            out = out[1:]
+    if len(out) >= 2:
+        last  = out[-1]; before = out[-2]
+        if (last["end"] - last["start"]) < island_tol and last["speaker"] != before["speaker"]:
+            before["end"] = max(before["end"], last["end"])
+            out = out[:-1]
+    return out
+
+def _smooth_diar_rows(rows, glue_tol: float = 0.05, island_tol: float = 0.18):
+    """
+    rows: list of {"start": float, "end": float, "speaker": str}
+    1) merge same-speaker overlaps and near-touches (glue_tol)
+    2) collapse A-B-A islands shorter than island_tol
+    3) merge again (just in case new touch points appeared)
+    """
+    if not rows: return []
+    a = _merge_adjacent_same_speaker(rows, glue_tol=glue_tol)
+    b = _collapse_islands(a, island_tol=island_tol)
+    c = _merge_adjacent_same_speaker(b, glue_tol=glue_tol)
+    out = []
+    for r in c:
+        st = float(max(0.0, r["start"]))
+        en = float(max(st, r["end"]))
+        out.append({"start": st, "end": en, "speaker": str(r["speaker"])})
+    return sorted(out, key=lambda r: (r["start"], r["end"]))
+
 def _proc_diar_entry(job: dict, out_q):
     """
     Pyannote diarization on CPU, single process.
+    No worker pools; thread parallelism is via Torch only.
     """
     try:
         t, io = _recommended_threads()
@@ -1572,16 +1638,26 @@ pipeline:
         out_q.put(("log","[Diarise] run"))
         with torch.no_grad():
             diarization = pipe({"waveform": waveform, "sample_rate": 16000}, **diar_kwargs)
+
         out_q.put(("log","[Diarise] assign"))
+
         did_word=False
         has_word_ts = any((s.get("words") or []) for s in (segments or [])) and any(
             any(isinstance(w,dict) and w.get("start") is not None and w.get("end") is not None for w in (s.get("words") or []))
             for s in (segments or []))
+
         if alignment_on and has_word_ts:
-            rows=[]
+            # collect raw rows
+            raw_rows=[]
             for (segment,_,speaker) in diarization.itertracks(yield_label=True):
-                rows.append({"start": float(segment.start), "end": float(segment.end), "speaker": str(speaker)})
-            diar_df=pd.DataFrame(rows)
+                raw_rows.append({"start": float(segment.start), "end": float(segment.end), "speaker": str(speaker)})
+            raw_rows = sorted(raw_rows, key=lambda r: (r["start"], r["end"]))
+
+            # pre-smooth rows (match macOS tolerances)
+            sm_rows = _smooth_diar_rows(raw_rows, glue_tol=0.05, island_tol=0.18)
+
+            diar_df = pd.DataFrame(sm_rows)
+
             def _miniseg(segs):
                 out=[]
                 for s in (segs or []):
@@ -1602,14 +1678,16 @@ pipeline:
                         ms["words"].append({"start": ws, "end": we, "word": token})
                     out.append(ms)
                 return out
+
             try:
                 final=_wx.assign_word_speakers(diar_df, {"segments": _miniseg(segments)})
                 segments=final["segments"]
                 segments, flips=_smooth_word_speakers(segments, min_run_dur=0.8)
-                out_q.put(("log", f"[Diarise] word-level; flips={flips}"))
+                out_q.put(("log", f"[Diarise] word-level (smoothed); flips={flips}"))
                 did_word=True
             except Exception as e:
                 out_q.put(("log", f"[Diarise] word-level failed: {e}"))
+
         if not did_word:
             segments=_segment_level_assign_by_overlap(diarization, segments)
             out_q.put(("log","[Diarise] segment-level"))
@@ -1697,7 +1775,7 @@ def _merge_by_speaker_word_level(self, segments):
                 if seg_end is not None: curr["end"]=seg_end
                 curr["tokens"].append(" " + seg_txt)
     if curr is not None: utterances.append(curr)
-    spk_map=self._speaker_id_map(speakers_seen)
+    spk_map=self._speaker_id_map(speakers_in_order=speakers_seen)
     out=[]
     for u in utterances:
         sid=spk_map.get(u["speaker"],0); label=f"Speaker{sid:02d}"
@@ -1895,7 +1973,7 @@ def _run_batch(self):
 # =================== LLM (llama-cli, non-blocking, minimal flags, robust decoding) ===================
 
 def _llama_vendor_dir():
-    p = LLAMA_VENDOR_DIR
+    p = VENDOR / "llama.cpp"
     try: p.mkdir(parents=True, exist_ok=True)
     except Exception: pass
     return p
@@ -1908,7 +1986,7 @@ def _find_llama_binary():
     return None
 
 def _resolve_gguf_model():
-    pref = MODELS / QWEN_GGUF_DIR_LABEL / QWEN_GGUF_FILENAME
+    pref = MODELS / "unsloth__Qwen3-4B-Instruct-2507-GGUF" / "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
     if pref.exists(): return str(pref)
     for g in MODELS.rglob("*.gguf"): return str(g)
     return None
@@ -2050,7 +2128,7 @@ class _LlamaOnceMinimal:
         env = _offline_env_for_llama()
         cwd = str(_llama_vendor_dir())
 
-        # --- Windows: hide console and ensure DLLs are discoverable ---
+        # --- Windows: hide console and ensure DLL path ---
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         creationflags = 0x08000000  # CREATE_NO_WINDOW
@@ -2147,6 +2225,11 @@ def _llm_run_over_outputs(self, task: str, custom_prompt: str | None = None):
         self._post("log", f"[LLM] unknown task: {task}"); return
 
     base=Path(in_path); out_path=str(base.with_name(base.stem + suffix))
+    try:
+        mx=int(self.llm_max_new.get() or "2048")
+    except Exception:
+        mx=2048
+    mx=max(64, min(mx, 30000))
 
     def _worker():
         setattr(self, "_llm_busy", True)
@@ -2155,18 +2238,31 @@ def _llm_run_over_outputs(self, task: str, custom_prompt: str | None = None):
         try:
             runner = _LlamaOnceMinimal()
 
-            # read GUI params safely
-            try: mx = int(str(self.llm_max_new.get()).strip())
-            except Exception: mx = 2048
+            try:
+                mx = int(str(self.llm_max_new.get()).strip())
+            except Exception:
+                mx = 2048
             mx = max(64, min(mx, 30000))
-            try: temp = float(str(self.llm_temp.get()).strip())
-            except Exception: temp = 0.3
-            try: top_p = float(str(self.llm_top_p.get()).strip())
-            except Exception: top_p = 0.9
-            try: top_k = int(str(self.llm_top_k.get()).strip())
-            except Exception: top_k = 50
-            try: rep_pen = float(str(self.llm_rep_pen.get()).strip())
-            except Exception: rep_pen = 1.12
+
+            try:
+                temp = float(str(self.llm_temp.get()).strip())
+            except Exception:
+                temp = 0.3
+
+            try:
+                top_p = float(str(self.llm_top_p.get()).strip())
+            except Exception:
+                top_p = 0.9
+
+            try:
+                top_k = int(str(self.llm_top_k.get()).strip())
+            except Exception:
+                top_k = 50
+
+            try:
+                rep_pen = float(str(self.llm_rep_pen.get()).strip())
+            except Exception:
+                rep_pen = 1.12
 
             runner.run_to_file(
                 prompt,
@@ -2229,8 +2325,8 @@ def main():
     # Windows + PyInstaller: configure multiprocessing BEFORE creating Tk
     try:
         import multiprocessing as mp
-        mp.set_start_method("spawn", force=True)
-        mp.set_executable(sys.executable)
+        mp.set_start_method("spawn", force=True)   # explicit & idempotent
+        mp.set_executable(sys.executable)          # use this frozen EXE for children
     except Exception:
         pass
 
@@ -2239,6 +2335,7 @@ def main():
     app.mainloop()
 
 if __name__ == "__main__":
+    # Critical so child processes don't re-run GUI when spawned by PyInstaller
     try:
         import multiprocessing as mp
         mp.freeze_support()
@@ -2250,6 +2347,8 @@ if __name__ == "__main__":
     except Exception:
         try:
             from tkinter import messagebox
+            import traceback, sys
             messagebox.showerror("Fatal error", traceback.format_exc())
         except Exception:
+            import traceback, sys
             print(traceback.format_exc(), file=sys.stderr)
