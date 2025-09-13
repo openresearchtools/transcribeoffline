@@ -1860,9 +1860,12 @@ class _LlamaOnceMinimal:
     """Run llama-cli once. Minimal flags, robust decoding, kill after done."""
     def __init__(self):
         exe = _find_llama_binary(); model = _resolve_gguf_model()
-        if not exe or not os.path.exists(exe):  raise RuntimeError("llama binary not found")
-        if not model or not os.path.exists(model):  raise RuntimeError("GGUF model not found")
-        self.exe = exe; self.model = model
+        if not exe or not os.path.exists(exe):
+            raise RuntimeError("llama binary not found")
+        if not model or not os.path.exists(model):
+            raise RuntimeError("GGUF model not found")
+        self.exe = exe
+        self.model = model
         self._lock = threading.Lock()
 
     def run_to_file(
@@ -1894,45 +1897,83 @@ class _LlamaOnceMinimal:
 
         args += ["-p", prompt]
 
-        env = _offline_env_for_llama(); cwd = str(_llama_vendor_dir())
+        env = _offline_env_for_llama()
+        cwd = str(_llama_vendor_dir())
+
+        # --- Windows: hide console and make sure bundled DLLs are discoverable ---
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        creationflags = 0x08000000  # CREATE_NO_WINDOW
+        try:
+            os.add_dll_directory(str(_llama_vendor_dir()))
+        except Exception:
+            # Older Python might not have add_dll_directory; PATH from env should still work
+            pass
+
         with self._lock:
-            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=cwd, env=env)
-            wrote = False; start = time.time()
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                cwd=cwd,
+                env=env,
+                startupinfo=si,
+                creationflags=creationflags,
+                stdin=subprocess.DEVNULL,
+            )
+            wrote = False
+            start = time.time()
             with open(out_path, "w", encoding="utf-8", newline="") as f:
                 try:
                     while True:
-                        if proc.stdout is None: break
+                        if proc.stdout is None:
+                            break
                         line_b = proc.stdout.readline()
                         if not line_b:
-                            if proc.poll() is not None: break
-                            if time.time() - start > timeout_sec: break
+                            if proc.poll() is not None:
+                                break
+                            if time.time() - start > timeout_sec:
+                                break
                             continue
                         try:
                             line = line_b.decode("utf-8")
                         except Exception:
-                            try: line = line_b.decode("cp1252")
-                            except Exception: line = line_b.decode("latin-1", "ignore")
+                            try:
+                                line = line_b.decode("cp1252")
+                            except Exception:
+                                line = line_b.decode("latin-1", "ignore")
 
                         if "<<<END>>>" in line:
                             line = line.split("<<<END>>>", 1)[0]
                             line = _normalise_model_line(line)
-                            if line: f.write(line); f.flush(); wrote = True
+                            if line:
+                                f.write(line)
+                                f.flush()
+                                wrote = True
                             break
 
                         if not _is_noise(line):
                             line = _normalise_model_line(line)
-                            if line: f.write(line); f.flush(); wrote = True
+                            if line:
+                                f.write(line)
+                                f.flush()
+                                wrote = True
 
-                    try: proc.wait(timeout=2)
-                    except subprocess.TimeoutExpired: pass
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
                 finally:
                     try:
-                        if proc.poll() is None: proc.kill()
-                    except Exception: pass
+                        if proc.poll() is None:
+                            proc.kill()
+                    except Exception:
+                        pass
 
             if not wrote:
                 with open(out_path, "w", encoding="utf-8") as f:
                     f.write("")
+
 
 # ---------- LLM UI hook (NON-BLOCKING) ----------
 def _llm_run_over_outputs(self, task: str, custom_prompt: str | None = None):
@@ -2036,7 +2077,6 @@ App._run_batch = _run_batch
 App._llm_run_over_outputs = _llm_run_over_outputs
 
 # --------------------------- Entrypoint ---------------------------
-
 def _load_icon_if_present(app: tk.Tk):
     try:
         ico = CONTENT / "AppIcon.ico"
@@ -2051,11 +2091,19 @@ def _load_icon_if_present(app: tk.Tk):
         pass
 
 def main():
-    # Make sure ffmpeg path is resolved (no noisy logging)
+    # Make sure ffmpeg is resolvable; do not spam logs
     try:
         _ = ffmpeg_path()
     except SystemExit:
         return
+    except Exception:
+        pass
+
+    # Windows + PyInstaller: configure multiprocessing BEFORE creating Tk
+    try:
+        import multiprocessing as mp
+        mp.set_start_method("spawn", force=True)   # explicit & idempotent
+        mp.set_executable(sys.executable)          # use this frozen EXE for children
     except Exception:
         pass
 
@@ -2064,12 +2112,10 @@ def main():
     app.mainloop()
 
 if __name__ == "__main__":
-    # IMPORTANT for Windows + PyInstaller to avoid a duplicate GUI in child processes
+    # Critical so child processes don't re-run GUI when spawned by PyInstaller
     try:
-        import multiprocessing as mp, sys
-        mp.freeze_support()                 # lets the spawned child init without running GUI
-        mp.set_executable(sys.executable)   # ensure children use the frozen EXE
-        mp.set_start_method("spawn", force=True)
+        import multiprocessing as mp
+        mp.freeze_support()
     except Exception:
         pass
 
@@ -2078,9 +2124,8 @@ if __name__ == "__main__":
     except Exception:
         try:
             from tkinter import messagebox
-            import traceback
+            import traceback, sys
             messagebox.showerror("Fatal error", traceback.format_exc())
         except Exception:
             import traceback, sys
             print(traceback.format_exc(), file=sys.stderr)
-
