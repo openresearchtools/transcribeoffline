@@ -1320,7 +1320,7 @@ def _proc_transcribe_entry(job: dict, out_q):
         segments, info = model.transcribe(
             media_path,
             language=None if lang_code=="auto" else lang_code,
-            word_timestamps=True,
+            word_timestamps=False,
             vad_filter=False,
         )
         seg_list=[]
@@ -1476,122 +1476,13 @@ def _segment_level_assign_by_overlap(annotation, segments):
             if not w.get("speaker"): w["speaker"]=best_spk
     return segments
 
-def _smooth_word_speakers(segments, min_run_dur: float=0.8) -> tuple[list, int]:
-    flips_total=0
-    for s in (segments or []):
-        words=s.get("words") or []
-        if len(words)<2: continue
-        def _build_runs():
-            runs=[]; cur=None; start=0
-            for i,w in enumerate(words):
-                spk=w.get("speaker")
-                if spk!=cur:
-                    if cur is not None: runs.append((cur,start,i-1))
-                    cur=spk; start=i
-            if cur is not None: runs.append((cur,start,len(words)-1))
-            return runs
-        def _dur(a,b):
-            try: st=float(words[a].get("start",0.0)); en=float(words[b].get("end",st))
-            except Exception: return 0.0
-            return max(0.0, en-st)
-        runs=_build_runs()
-        for r in range(1,len(runs)-1):
-            spk,a,b=runs[r]; dur=_dur(a,b)
-            if dur<min_run_dur:
-                left=runs[r-1][0]; right=runs[r+1][0]
-                if left==right and left!=spk:
-                    for i in range(a,b+1):
-                        if words[i].get("speaker")!=left:
-                            words[i]["speaker"]=left; flips_total+=1
-        runs=_build_runs()
-        if len(runs)>=2:
-            spk,a,b=runs[0]
-            if _dur(a,b)<min_run_dur:
-                to=runs[1][0]
-                if to!=spk:
-                    for i in range(a,b+1): words[i]["speaker"]=to; flips_total+=1
-        runs=_build_runs()
-        if len(runs)>=2:
-            spk,a,b=runs[-1]
-            if _dur(a,b)<min_run_dur:
-                to=runs[-2][0]
-                if to!=spk:
-                    for i in range(a,b+1): words[i]["speaker"]=to; flips_total+=1
-        totals={}
-        for w in words:
-            spk=w.get("speaker") or "SPEAKER_00"
-            try: ws=float(w.get("start",0.0)); we=float(w.get("end",ws))
-            except Exception: ws=0.0; we=0.0
-            totals[spk]=totals.get(spk,0.0)+max(0.0,we-ws)
-        if totals: s["speaker"]=max(totals.items(), key=lambda kv: kv[1])[0]
-    return segments, flips_total
-
-# --- NEW: diarization turn smoothing to remove tiny A-B-A islands and glue near-touching turns ---
-def _merge_adjacent_same_speaker(rows, glue_tol: float = 0.05):
-    """Merge same-speaker rows that overlap or nearly touch (<= glue_tol)."""
-    if not rows: return []
-    rows = sorted(rows, key=lambda r: (r["start"], r["end"]))
-    out = [dict(rows[0])]
-    for r in rows[1:]:
-        last = out[-1]
-        if r["speaker"] == last["speaker"] and r["start"] <= last["end"] + glue_tol:
-            last["end"] = max(last["end"], r["end"])
-        else:
-            out.append(dict(r))
-    return out
-
-def _collapse_islands(rows, island_tol: float = 0.18):
-    """
-    Collapse A–B–A where B is a short 'island' (< island_tol). Also collapses
-    short first/last islands to their neighbor.
-    """
-    if len(rows) <= 1: return rows
-    out = [dict(rows[0])]
-    for i in range(1, len(rows)-1):
-        prev = out[-1]
-        cur  = rows[i]
-        nxt  = rows[i+1]
-        cur_dur = max(0.0, cur["end"] - cur["start"])
-        if cur_dur < island_tol and prev["speaker"] == nxt["speaker"] != cur["speaker"]:
-            prev["end"] = nxt["start"]
-            continue
-        out.append(dict(cur))
-    out.append(dict(rows[-1]))
-
-    if len(out) >= 2:
-        first = out[0]; second = out[1]
-        if (first["end"] - first["start"]) < island_tol and first["speaker"] != second["speaker"]:
-            second["start"] = min(second["start"], first["start"])
-            out = out[1:]
-    if len(out) >= 2:
-        last  = out[-1]; before = out[-2]
-        if (last["end"] - last["start"]) < island_tol and last["speaker"] != before["speaker"]:
-            before["end"] = max(before["end"], last["end"])
-            out = out[:-1]
-    return out
-
-def _smooth_diar_rows(rows, glue_tol: float = 0.05, island_tol: float = 0.18):
-    """
-    rows: list of {"start": float, "end": float, "speaker": str}
-    1) merge same-speaker overlaps and near-touches (glue_tol)
-    2) collapse A-B-A islands shorter than island_tol
-    3) merge again (just in case new touch points appeared)
-    """
-    if not rows: return []
-    a = _merge_adjacent_same_speaker(rows, glue_tol=glue_tol)
-    b = _collapse_islands(a, island_tol=island_tol)
-    c = _merge_adjacent_same_speaker(b, glue_tol=glue_tol)
-    out = []
-    for r in c:
-        st = float(max(0.0, r["start"]))
-        en = float(max(st, r["end"]))
-        out.append({"start": st, "end": en, "speaker": str(r["speaker"])})
-    return sorted(out, key=lambda r: (r["start"], r["end"]))
-
 def _proc_diar_entry(job: dict, out_q):
     """
     Pyannote diarization on CPU, single process.
     No worker pools; thread parallelism is via Torch only.
+
+    NOTE (mac-exact): uses RAW pyannote turns + whisperx.assign_word_speakers.
+    No pre/post smoothing, no glue/island collapse, no word-run smoothing.
     """
     try:
         t, io = _recommended_threads()
@@ -1647,16 +1538,12 @@ pipeline:
             for s in (segments or []))
 
         if alignment_on and has_word_ts:
-            # collect raw rows
+            # RAW diar rows (no smoothing, mac-exact)
             raw_rows=[]
             for (segment,_,speaker) in diarization.itertracks(yield_label=True):
                 raw_rows.append({"start": float(segment.start), "end": float(segment.end), "speaker": str(speaker)})
             raw_rows = sorted(raw_rows, key=lambda r: (r["start"], r["end"]))
-
-            # pre-smooth rows (match macOS tolerances)
-            sm_rows = _smooth_diar_rows(raw_rows, glue_tol=0.05, island_tol=0.18)
-
-            diar_df = pd.DataFrame(sm_rows)
+            diar_df = pd.DataFrame(raw_rows)
 
             def _miniseg(segs):
                 out=[]
@@ -1682,8 +1569,7 @@ pipeline:
             try:
                 final=_wx.assign_word_speakers(diar_df, {"segments": _miniseg(segments)})
                 segments=final["segments"]
-                segments, flips=_smooth_word_speakers(segments, min_run_dur=0.8)
-                out_q.put(("log", f"[Diarise] word-level (smoothed); flips={flips}"))
+                out_q.put(("log", "[Diarise] word-level (raw)"))
                 did_word=True
             except Exception as e:
                 out_q.put(("log", f"[Diarise] word-level failed: {e}"))
