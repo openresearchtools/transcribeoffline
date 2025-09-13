@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-
 from __future__ import annotations
 import os, sys, json, csv, time, queue, shutil, traceback, threading, re, subprocess, tempfile, importlib, gc
 from pathlib import Path
@@ -44,22 +43,22 @@ os.environ.update({
     "TOKENIZERS_PARALLELISM": "false",
 })
 
-APP_NAME = "Transcribe Offline"
+APP_NAME = "Transcribe Offline (Windows)"
 
-# --------------------------- Performance caps (MAX ONLY) ---------------------------
+# --------------------------- Performance caps (MAX by default) ---------------------------
 def _cpu_logical_cores() -> int:
-    try: return max(1, os.cpu_count() or 1)
-    except Exception: return 1
+    try:
+        return max(1, os.cpu_count() or 1)
+    except Exception:
+        return 1
 
 def _recommended_threads() -> tuple[int, int]:
     """
-    MAX performance only: use all logical cores.
-    (Balanced mode removed entirely.)
+    Always run in 'max' mode now (GUI control removed).
     """
     n = _cpu_logical_cores()
-    threads = max(1, n)
-    interop = max(1, n // 2)
-    # Optional manual overrides if user sets envs:
+    threads = max(1, n)          # use all logical cores
+    interop = max(1, threads // 2)
     try: threads = int(os.getenv("TRANSOFF_THREADS", threads))
     except Exception: pass
     try: interop = int(os.getenv("TRANSOFF_INTEROP", interop))
@@ -67,18 +66,17 @@ def _recommended_threads() -> tuple[int, int]:
     return threads, interop
 
 def _apply_perf_env_caps():
-    """Apply BLAS/OMP caps to current process (MAX only)."""
     try:
+        # Force MAX by default (no GUI toggle)
+        os.environ["TRANSOFF_MODE"] = "max"
         thr, _ = _recommended_threads()
         os.environ["OMP_NUM_THREADS"]       = str(thr)
         os.environ["MKL_NUM_THREADS"]       = str(thr)
         os.environ["OPENBLAS_NUM_THREADS"]  = str(thr)
         os.environ["NUMEXPR_NUM_THREADS"]   = str(thr)
-        os.environ["TRANSOFF_MODE"]         = "max"
     except Exception:
         pass
 
-# Apply caps now (children will re-derive)
 _apply_perf_env_caps()
 
 def _resource_base() -> Path:
@@ -293,7 +291,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("1260x900"); self.minsize(1120,780)
+        self.geometry("1260x900"); self.minsize(1120,760)
         _apply_icon(self)
 
         # queues/state
@@ -335,9 +333,9 @@ class App(tk.Tk):
         self._player_tick_id=None
         self._paused=True
 
-        # Editing / read-only
-        self._edit_active = False
-        self._edit_btn_txt = tk.StringVar(value="Edit transcript…")
+        # Editing guard (read-only by default)
+        self._editing_var = tk.BooleanVar(value=False)  # False => read-only
+        self._last_created_edited: str | None = None
 
         # Player (sounddevice)
         if not HAS_SD:
@@ -347,13 +345,6 @@ class App(tk.Tk):
         self._build_layout()
         self.after(120, self._poll_queue)
         self._update_align_availability()
-
-        # Log chosen perf settings (MAX only)
-        try:
-            t, io = _recommended_threads()
-            self._post("log", f"[Perf] MAX • CPU cores={_cpu_logical_cores()} • threads={t} • torch interop={io}")
-        except Exception:
-            pass
 
         # Hotkeys
         self.bind_all("<Control-space>", lambda e: self._toggle_pause())
@@ -380,7 +371,6 @@ class App(tk.Tk):
         ttk.Label(ctrl1, text="Mode:").pack(side="left", padx=(16,4))
         ttk.Radiobutton(ctrl1, text="Transcribe", variable=self.mode_var, value="transcribe", command=self._on_mode_change).pack(side="left")
         ttk.Radiobutton(ctrl1, text="Subtitles",  variable=self.mode_var, value="subs",        command=self._on_mode_change).pack(side="left", padx=5)
-
         ttk.Button(ctrl1, text="About…", command=self._open_about_window).pack(side="right", padx=(8,0))
 
         ctrl2 = ttk.Frame(root); ctrl2.pack(fill="x", **pad)
@@ -424,34 +414,33 @@ class App(tk.Tk):
         ttk.Button(row_out_buttons, text="Select all", command=lambda: self.output_list.selection_set(0, "end")).pack(side="left", padx=6)
         lists_row.add(right_small, weight=1)
 
-        # ===== Center area as vertical Panedwindow so bars never disappear =====
-        center = ttk.Panedwindow(root, orient="vertical")
-        center.pack(fill="both", expand=True, **pad)
+        # A vertical PanedWindow to keep Output + Log both visible with min sizes
+        center_split = ttk.Panedwindow(root, orient="vertical"); center_split.pack(fill="both", expand=True, **pad)
 
-        # Output/editor and controls (top pane)
-        output_frame = ttk.Labelframe(center, text="Output")
-        center.add(output_frame, weight=3, minsize=220)  # ~8+ lines
-
-        # --------------- LLM row 1 ---------------
-        llm_row1 = ttk.Frame(output_frame); llm_row1.pack(fill="x", padx=4, pady=(4,2))
+        # Output/editor and controls
+        output_frame = ttk.Labelframe(center_split, text="Output")
+        # LLM row 1: target + params + actions (translate/summarise/correct/custom)
+        llm_row1 = ttk.Frame(output_frame); llm_row1.pack(fill="x", padx=4, pady=(6,4))
         ttk.Label(llm_row1, text="Target language:").pack(side="left")
         ttk.Combobox(llm_row1, textvariable=self.llm_target_lang_var, width=18, state="readonly",
-                     values=LLM_LANG_NAMES).pack(side="left", padx=(2,10))
-        ttk.Button(llm_row1, text="Model Parameters…", command=self._open_llm_params).pack(side="left", padx=(0,10))
+                     values=LLM_LANG_NAMES).pack(side="left", padx=(4,10))
+        ttk.Button(llm_row1, text="Model parameters…", command=self._open_llm_params).pack(side="left", padx=(0,10))
         ttk.Button(llm_row1, text="Translate", command=self._llm_translate_selected).pack(side="left", padx=4)
         ttk.Button(llm_row1, text="Summarise", command=self._llm_summarise_selected).pack(side="left", padx=4)
-        ttk.Button(llm_row1, text="Correct", command=self._llm_correct_selected).pack(side="left", padx=4)
+        ttk.Button(llm_row1, text="Correct text", command=self._llm_correct_selected).pack(side="left", padx=4)
         ttk.Button(llm_row1, text="Custom Prompt…", command=self._llm_custom_prompt_dialog).pack(side="left", padx=8)
 
-        # --------------- LLM row 2 (text size + edit toggle) ---------------
-        llm_row2 = ttk.Frame(output_frame); llm_row2.pack(fill="x", padx=4, pady=(0,4))
-        ttk.Label(llm_row2, text="Text size:").pack(side="left")
+        # LLM row 2: text size + Edit toggle
+        llm_row2 = ttk.Frame(output_frame); llm_row2.pack(fill="x", padx=4, pady=(0,6))
+        ttk.Label(llm_row2, text="Text size:").pack(side="left", padx=(0,6))
         ttk.Button(llm_row2, text="A-", command=lambda: self._bump_text_size(-1)).pack(side="left")
         ttk.Button(llm_row2, text="A+", command=lambda: self._bump_text_size(+1)).pack(side="left", padx=(4,0))
-        ttk.Button(llm_row2, text="Reset", command=lambda: self._set_text_size(10)).pack(side="left", padx=(4,10))
-        ttk.Button(llm_row2, textvariable=self._edit_btn_txt, command=self._toggle_edit_mode).pack(side="left", padx=(6,0))
+        ttk.Button(llm_row2, text="Reset", command=lambda: self._set_text_size(10)).pack(side="left", padx=(4,12))
+        self._edit_btn = ttk.Checkbutton(llm_row2, text="Edit transcript", variable=self._editing_var,
+                                         command=self._on_toggle_edit)
+        self._edit_btn.pack(side="left")
 
-        # The editor (read-only by default)
+        # The editor
         self.preview_font = tkfont.Font(family="Consolas", size=10) if tkfont else None
         self.preview = tk.Text(output_frame, wrap="word",
                                font=self.preview_font if self.preview_font else ("Consolas", 10),
@@ -460,33 +449,36 @@ class App(tk.Tk):
         self.preview.tag_configure("seg_active", background="#FFF59D")
         self.preview.bind("<<Modified>>", self._on_preview_modified)
         self.preview.bind("<Double-Button-1>", self._on_preview_double_click)
-        # Start read-only
-        self.preview.configure(state="disabled")
 
-        # Player bar — speed IN THE SAME ROW as playback
-        player_bar = ttk.Frame(output_frame); player_bar.pack(fill="x", padx=4, pady=(4,0))
-
-        # Left: speed controls
-        ttk.Label(player_bar, text="Speed ×").pack(side="left")
-        self._speed_entry = ttk.Entry(player_bar, textvariable=self._play_speed_var, width=6)
-        self._speed_entry.pack(side="left", padx=(4,6))
-        ttk.Button(player_bar, text="Apply to next play",
-                   command=lambda: self._post("log", f"[Player] next play speed ×{self._safe_speed():.3f}")).pack(side="left", padx=(0,10))
-
+        # Player bar — playback + speed on the SAME row
+        player_bar = ttk.Frame(output_frame); player_bar.pack(fill="x", padx=4, pady=(6,4))
+        # Left: speed controls (applies on next Play)
+        sp_left = ttk.Frame(player_bar); sp_left.pack(side="left")
+        ttk.Label(sp_left, text="Speed ×").pack(side="left")
+        ttk.Entry(sp_left, textvariable=self._play_speed_var, width=6).pack(side="left", padx=(4,6))
+        ttk.Button(sp_left, text="Apply to next play",
+                   command=lambda: self._post("log", f"[Player] next play speed ×{self._safe_speed():.3f}")).pack(side="left")
         # Right: playback buttons
-        ttk.Button(player_bar, text="Stop ⏹", command=self._stop_playback).pack(side="right", padx=4)
+        pb_right = ttk.Frame(player_bar); pb_right.pack(side="right")
+        ttk.Button(pb_right, text="Stop ⏹", command=self._stop_playback).pack(side="right", padx=4)
         self._pause_btn_txt = tk.StringVar(value="Pause ⏸ (Ctrl+Space)")
-        ttk.Button(player_bar, textvariable=self._pause_btn_txt, command=self._toggle_pause).pack(side="right", padx=4)
-        ttk.Button(player_bar, text="Play All ▶", command=self._play_all).pack(side="right", padx=4)
+        ttk.Button(pb_right, textvariable=self._pause_btn_txt, command=self._toggle_pause).pack(side="right", padx=4)
+        ttk.Button(pb_right, text="Play All ▶", command=self._play_all).pack(side="right", padx=4)
 
-        # Log (bottom pane with minsize so it never vanishes)
-        log_frame = ttk.Labelframe(center, text="Log")
-        center.add(log_frame, weight=1, minsize=70)  # ~2 lines
+        # Add Output pane to the splitter with a minimum height (≈ 8 lines)
+        center_split.add(output_frame, weight=5, minsize=180)
+
+        # Log (kept visible with min height ≈ 2 lines)
+        log_frame = ttk.Labelframe(center_split, text="Log")
         self.log = tk.Text(log_frame, wrap="word", font=("Consolas", 9), height=6)
-        self.log.pack(fill="both", expand=True)
+        self.log.pack(fill="both", expand=True, padx=4, pady=4)
+        center_split.add(log_frame, weight=1, minsize=48)
 
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(root, textvariable=self.status_var).pack(anchor="w", padx=6, pady=3)
+
+        # Read-only by default
+        self._apply_preview_editability()
 
         self._on_mode_change()
 
@@ -568,198 +560,174 @@ class App(tk.Tk):
     def _clear_outputs(self):
         self.output_list.delete(0,"end"); self.output_files.clear()
 
-    # ---------- Read-only / editing helpers ----------
+    # ---------- Read-only / Edit handling ----------
+    _EDITED_RE = re.compile(r'\.edited(\d+)?$', re.I)  # matches ".edited" or ".editedNN" (on the stem)
+
     def _is_edited_path(self, path: str | None) -> bool:
         if not path: return False
-        stem = Path(path).stem
-        return bool(re.search(r"\.edited(\d+)?$", stem))
+        p = Path(path)
+        return bool(self._EDITED_RE.search(p.stem))
 
-    def _apply_editor_state_for_current_path(self):
-        """Lock editor unless we are actively editing an .edited* file."""
-        path = self._current_preview_path
-        can_edit = self._is_edited_path(path) and self._edit_active
+    def _apply_preview_editability(self):
+        """Enable/disable Text based on editing_var and current file."""
+        can_edit = bool(self._editing_var.get() and self._is_edited_path(self._current_preview_path))
         try:
-            self.preview.configure(state="normal")
-            if not can_edit:
-                # show file but lock edits
-                self.preview.configure(state="disabled")
-                self._edit_btn_txt.set("Edit transcript…")
+            self.preview.configure(state=("normal" if can_edit else "disabled"))
+        except Exception:
+            pass
+        try:
+            if self._editing_var.get() and not self._is_edited_path(self._current_preview_path):
+                # reflect that we will prompt to create/select edited before enabling
+                self._edit_btn.configure(text="Edit transcript (will create/select .edited)")
             else:
-                self.preview.configure(state="normal")
-                self._edit_btn_txt.set("Stop editing (read-only)")
+                self._edit_btn.configure(text=("Editing ON" if can_edit else "Edit transcript"))
         except Exception:
             pass
 
-    def _find_edited_versions(self, original_path: str) -> list[str]:
-        """Return existing .edited, .edited2, ... with same dirname, base and extension."""
+    def _next_edited_path_for(self, original_path: str) -> str:
+        """Compute next available .editedN filename next to original (preserve extension)."""
         p = Path(original_path)
-        base = p.stem
+        base = p.with_suffix("")  # stem with no extension
         ext = p.suffix
-        # strip any existing .edited* if user fed one accidentally
-        base_clean = re.sub(r"\.edited(\d+)?$", "", base)
-        candidates = []
-        for cand in p.parent.glob(f"{base_clean}.edited*{ext}"):
-            # Only count .edited or .editedN (N >= 2)
-            m = re.search(r"\.edited(\d+)?$", cand.stem)
-            if m:
-                candidates.append(str(cand))
-        # sort by N (None -> 1)
-        def _ver(cpath: str) -> int:
-            m = re.search(r"\.edited(\d+)?$", Path(cpath).stem)
-            if not m: return 1
-            return int(m.group(1) or "1")
-        candidates.sort(key=_ver)
-        return candidates
+        # base may already be something like foo.edited3 → strip any edited from stem for NEW
+        stem_clean = re.sub(self._EDITED_RE, "", base.name, flags=re.I)
+        # Try .edited, .edited2, .edited3, ...
+        for n in [None] + list(range(2, 1000)):
+            tag = "edited" if n is None else f"edited{n}"
+            cand = base.with_name(f"{stem_clean}.{tag}{ext}")
+            if not cand.exists():
+                return str(cand)
+        # fallback extremely unlikely
+        return str(base.with_name(f"{stem_clean}.edited999{ext}"))
 
-    def _next_edited_path(self, original_path: str) -> str:
-        p = Path(original_path)
-        base_clean = re.sub(r"\.edited(\d+)?$", "", p.stem)
-        ext = p.suffix
-        existing = self._find_edited_versions(original_path)
-        if not existing:
-            return str(p.with_name(base_clean + ".edited" + ext))
-        # find the next free number
-        nmax = 1
-        for c in existing:
-            m = re.search(r"\.edited(\d+)?$", Path(c).stem)
-            if m:
-                n = int(m.group(1) or "1")
-                nmax = max(nmax, n)
-        return str(p.with_name(f"{base_clean}.edited{nmax+1}{ext}"))
+    def _find_existing_edited_versions(self, original_like_path: str) -> list[str]:
+        """Find *.edited*, same stem, same extension, in same folder."""
+        p = Path(original_like_path)
+        folder = p.parent
+        ext = p.suffix.lower()
+        stem_clean = re.sub(self._EDITED_RE, "", p.stem, flags=re.I)
+        out = []
+        try:
+            for child in folder.iterdir():
+                if not child.is_file(): continue
+                if child.suffix.lower() != ext: continue
+                if re.sub(self._EDITED_RE, "", child.stem, flags=re.I) != stem_clean: continue
+                if self._is_edited_path(str(child)):
+                    out.append(str(child))
+        except Exception:
+            pass
+        out.sort()
+        return out
 
-    def _choose_or_create_edited_version(self, original_path: str) -> str | None:
-        """Popup: choose any existing edited version or create a new one."""
-        exists = self._find_edited_versions(original_path)
+    def _popup_choose_edited(self, originals_path: str) -> str | None:
+        """Modal chooser: pick an existing edited or create a new one. Returns chosen path or None."""
+        existing = self._find_existing_edited_versions(originals_path)
+        win = tk.Toplevel(self)
+        win.title("Choose edited version")
+        win.transient(self); win.grab_set()
+        ttk.Label(win, text="I found edited versions for this file. Choose one to continue editing\nor create a new edited copy.").pack(fill="x", padx=10, pady=(10,6))
 
-        dlg = tk.Toplevel(self)
-        dlg.title("Choose edited version")
-        dlg.transient(self); dlg.grab_set()
-        dlg.geometry("620x340")
+        listbox = tk.Listbox(win, height=min(8, len(existing) or 1), selectmode="browse")
+        for e in existing:
+            listbox.insert("end", os.path.basename(e))
+        listbox.pack(fill="x", padx=10, pady=(0,6))
 
-        ttk.Label(dlg, text="I found edited versions of this file. Choose one to continue editing, or create a new edited file.").pack(anchor="w", padx=10, pady=(10,6))
-
-        frame = ttk.Frame(dlg); frame.pack(fill="both", expand=True, padx=10, pady=(0,8))
-        y = ttk.Scrollbar(frame, orient="vertical")
-        lb = tk.Listbox(frame, selectmode="browse", yscrollcommand=y.set)
-        y.config(command=lb.yview)
-        lb.grid(row=0, column=0, sticky="nsew")
-        y.grid(row=0, column=1, sticky="ns")
-        frame.columnconfigure(0, weight=1); frame.rowconfigure(0, weight=1)
-
-        for path in exists:
-            lb.insert("end", path)
-
-        btns = ttk.Frame(dlg); btns.pack(fill="x", padx=10, pady=(0,10))
-
-        chosen = {"path": None}
-
-        def pick():
-            sel = lb.curselection()
-            if not sel:
-                messagebox.showerror("No selection", "Pick an existing edited file or click Create new.")
-                return
-            chosen["path"] = lb.get(sel[0])
-            dlg.destroy()
-
-        def create_new():
-            # build path, copy current preview content (original) into new file
-            newp = self._next_edited_path(original_path)
+        choice = {"path": None}  # mutable capture
+        btns = ttk.Frame(win); btns.pack(fill="x", padx=10, pady=10)
+        def use_selected():
             try:
-                content = self.preview.get("1.0", "end-1c")
+                sel = listbox.curselection()
+                if not sel: return
+                choice["path"] = existing[sel[0]]
+                win.destroy()
             except Exception:
-                content = ""
-            try:
-                with open(newp, "w", encoding="utf-8") as f:
-                    f.write(content)
-            except Exception as e:
-                messagebox.showerror("Write failed", f"Could not create edited file:\n{newp}\n\n{e}")
-                return
-            chosen["path"] = newp
-            dlg.destroy()
+                pass
+        def create_new():
+            choice["path"] = self._next_edited_path_for(originals_path)
+            win.destroy()
+        ttk.Button(btns, text="Use selected", command=use_selected).pack(side="left")
+        ttk.Button(btns, text="Create new edited", command=create_new).pack(side="left", padx=(6,0))
+        ttk.Button(btns, text="Cancel", command=lambda: (choice.update(path=None), win.destroy())).pack(side="right")
 
-        ttk.Button(btns, text="Open selected", command=pick, state=("normal" if exists else "disabled")).pack(side="right")
-        ttk.Button(btns, text="Create new", command=create_new).pack(side="right", padx=(0,8))
-        ttk.Button(btns, text="Cancel", command=lambda: (setattr(chosen, "clear", None), dlg.destroy())).pack(side="left")
+        if existing:
+            listbox.selection_set(0)
+        win.wait_window()
+        return choice["path"]
 
-        dlg.wait_window()
-        return chosen.get("path")
+    def _on_toggle_edit(self):
+        # If toggling ON editing while current file is an ORIGINAL → prompt to pick/create edited
+        if self._editing_var.get():
+            if not self._is_edited_path(self._current_preview_path) and self._current_preview_path:
+                chosen = self._popup_choose_edited(self._current_preview_path)
+                if not chosen:
+                    # Revert toggle if cancelled
+                    self._editing_var.set(False)
+                    self._apply_preview_editability()
+                    return
+                # If create-new was chosen, copy current text into that file
+                if not Path(chosen).exists():
+                    try:
+                        text = self.preview.get("1.0","end-1c") if self._current_preview_path else ""
+                        Path(chosen).write_text(text, encoding="utf-8")
+                        self._post("log", f"[Output] Created new edited → {chosen}")
+                    except Exception as e:
+                        messagebox.showerror("Create edited failed", str(e))
+                        self._editing_var.set(False)
+                        self._apply_preview_editability()
+                        return
+                # Load chosen edited file into Output list + preview
+                if chosen not in self.output_files:
+                    self.output_files.append(chosen); self.output_list.insert("end", chosen)
+                self._load_preview_file(chosen)
+        self._apply_preview_editability()
 
-    def _toggle_edit_mode(self):
-        # If no file open, do nothing
-        if not self._current_preview_path:
-            messagebox.showinfo("No file", "Open a transcript from the Output files list first.")
-            return
-
-        path = self._current_preview_path
-
-        if not self._edit_active:
-            # Turning ON editing
-            if self._is_edited_path(path):
-                self._edit_active = True
-                self._apply_editor_state_for_current_path()
-                return
-            # Original selected: offer picker/create-new like mac
-            target = self._choose_or_create_edited_version(path)
-            if not target:
-                # user canceled
-                self._edit_active = False
-                self._apply_editor_state_for_current_path()
-                return
-            # Load the chosen/created edited file
-            try:
-                with open(target, "r", encoding="utf-8") as f:
-                    txt = f.read()
-                self._current_preview_path = target
-                # Ensure it's listed
-                if target not in self.output_files:
-                    self.output_files.append(target); self.output_list.insert("end", target)
-                self._set_preview_text(txt)
-                self._parse_preview_segments()
-                self._edit_active = True
-                self._apply_editor_state_for_current_path()
-                self._post("log", f"[Edit] Now editing: {target}")
-            except Exception as e:
-                messagebox.showerror("Open failed", f"Could not open edited file:\n{target}\n\n{e}")
-                self._edit_active = False
-                self._apply_editor_state_for_current_path()
-        else:
-            # Turning OFF editing
-            self._edit_active = False
-            self._apply_editor_state_for_current_path()
-            self._post("log", "[Edit] Read-only")
+    def _load_preview_file(self, path: str):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self._current_preview_path = path
+            self._set_preview_text(content)
+            self._parse_preview_segments()
+            # If switching onto an ORIGINAL, force Edit off
+            if not self._is_edited_path(path):
+                self._editing_var.set(False)
+            self._apply_preview_editability()
+            self._auto_add_and_bind_media_for_output(path)
+        except Exception as e:
+            self._post("log", f"Failed to open preview file: {e}")
 
     # ---------- Preview / autosave ----------
     def _set_preview_text(self, text: str):
-        # temporarily unlock to insert text
-        self.preview.configure(state="normal")
-        self.preview.delete("1.0","end")
-        self.preview.insert("1.0", text)
-        self.preview.edit_modified(False)
-        # then re-apply correct lock state for the current file
-        self._apply_editor_state_for_current_path()
+        # Temporarily enable to set text regardless of current state
+        cur = self.preview.cget("state")
+        try:
+            self.preview.configure(state="normal")
+            self.preview.delete("1.0","end")
+            self.preview.insert("1.0", text)
+            self.preview.edit_modified(False)
+        finally:
+            self.preview.configure(state=cur)
 
     def _on_preview_modified(self, _evt=None):
-        # Don't autosave if we're programmatically updating or locked
-        if self.preview["state"] == "disabled":
-            self.preview.edit_modified(False); return
-        if not self._current_preview_path or not self._is_edited_path(self._current_preview_path) or not self._edit_active:
+        # Only autosave if editing is ON and current file is an edited variant
+        if not (self._current_preview_path and self._editing_var.get() and self._is_edited_path(self._current_preview_path)):
             self.preview.edit_modified(False); return
         if self._save_after_id:
             try: self.after_cancel(self._save_after_id)
             except Exception: pass
-        self._save_after_id = self.after(700, self._save_preview_to_same_edited)
+        self._save_after_id = self.after(700, self._save_preview_to_edited)
 
-    def _save_preview_to_same_edited(self):
+    def _save_preview_to_edited(self):
         self._save_after_id=None
-        path = self._current_preview_path
-        if not (path and self._is_edited_path(path) and self._edit_active):
+        if not (self._current_preview_path and self._editing_var.get() and self._is_edited_path(self._current_preview_path)):
             self.preview.edit_modified(False); return
+        out_path = self._current_preview_path  # always save back into the chosen .edited file
         try:
             content = self.preview.get("1.0","end-1c")
-            with open(path, "w", encoding="utf-8") as f: f.write(content)
-            if path not in self.output_files:
-                self.output_files.append(path); self.output_list.insert("end", path)
-            self._post("log", f"[Output] Autosaved edits → {path}")
+            with open(out_path, "w", encoding="utf-8") as f: f.write(content)
+            if out_path not in self.output_files:
+                self.output_files.append(out_path); self.output_list.insert("end", out_path)
+            self._post("log", f"[Output] Autosaved edits → {out_path}")
             self._parse_preview_segments()
         except Exception as e:
             self._post("log", f"[Output] Autosave failed: {e}")
@@ -898,8 +866,12 @@ class App(tk.Tk):
         self._active_seg_idx = seg_idx
         if seg_idx is None: return
         seg=self._segments[seg_idx]
-        self.preview.tag_add("seg_active", seg["start_idx"], seg["end_idx"])
-        self.preview.see(seg["start_idx"])
+        try:
+            self.preview.configure(state="normal")
+            self.preview.tag_add("seg_active", seg["start_idx"], seg["end_idx"])
+            self.preview.see(seg["start_idx"])
+        finally:
+            self._apply_preview_editability()
 
     def _highlight_for_time(self, t_source_sec: float):
         for i, seg in enumerate(self._segments):
@@ -914,7 +886,7 @@ class App(tk.Tk):
     _MEDIA_EXTS = (".mp3",".wav",".m4a",".flac",".ogg",".aac",".wma",".webm",".mp4",".mkv",".mov",".avi")
 
     def _strip_our_suffixes(self, stem: str) -> str:
-        return re.sub(r"(\.(translated|summarised|corrected)(\.[A-Za-z_]+)?|\.(custom|edited))$", "", stem)
+        return re.sub(r"(\.(translated|summarised|corrected)(\.[A-Za-z_]+)?|\.(custom|edited(\d+)?))$", "", stem, flags=re.I)
 
     def _auto_add_and_bind_media_for_output(self, out_path: str):
         out_p=Path(out_path); stem=self._strip_our_suffixes(out_p.stem)
@@ -1076,18 +1048,7 @@ class App(tk.Tk):
                     except Exception: pass
                     self.preview.see("end")
                 elif kind=="preview_from_file":
-                    p=str(payload)
-                    try:
-                        with open(p,"r",encoding="utf-8") as f: txt=f.read()
-                        self._current_preview_path = p
-                        self._set_preview_text(txt)
-                        self._parse_preview_segments()
-                        self._auto_add_and_bind_media_for_output(p)
-                        # Update editability based on file type
-                        self._edit_active = self._is_edited_path(p) and self._edit_active
-                        self._apply_editor_state_for_current_path()
-                    except Exception as e:
-                        self._post("log", f"Failed to open preview file: {e}")
+                    p=str(payload); self._load_preview_file(p)
                 elif kind=="add_output":
                     p=str(payload)
                     if p not in self.output_files:
@@ -1132,7 +1093,7 @@ class App(tk.Tk):
         row("Repeat penalty:", self.llm_rep_pen)
         ttk.Button(g, text="Close", command=dlg.destroy).pack(side="right", pady=(8,0))
 
-    # Prompts (ChatML wrapper & llama runner in PART 2/2)
+    # Prompts (ChatML wrapped in PART 2/2)
     def _prompt_translate(self, text: str) -> str:
         tgt_name, style = normalise_llm_lang(self.llm_target_lang_var.get())
         return (
@@ -1184,16 +1145,13 @@ class App(tk.Tk):
         editor.columnconfigure(0, weight=1)
         editor.rowconfigure(0,  weight=1)
 
-        # Hidden preamble (no rules, no hints)
         HIDDEN_PREAMBLE = "I will provide you the transcript that you will need to do the following:"
     
-        # Buttons + submit handler
         row = ttk.Frame(dlg)
         row.pack(fill="x", pady=6, padx=8)
 
         def _submit(_evt=None):
             user_instr = txt.get("1.0", "end-1c").strip()
-            # Build final prompt:
             final_prompt = HIDDEN_PREAMBLE
             if user_instr:
                 final_prompt += "\n\n" + user_instr
@@ -1219,10 +1177,7 @@ class App(tk.Tk):
         sel = self.output_list.curselection()
         if not sel: return
         p = self.output_list.get(sel[0])
-        # Always reload from disk (show ACTUAL SAVED FILE)
         self._post("preview_from_file", p)
-
-# ============================ PART 2 — Pipeline + llama-cli (non-blocking, robust decoding, save→preview) ============================
 # ============================ PART 2 — Pipeline + llama-cli (non-blocking, robust decoding, save→preview) ============================
 
 import os, sys, re, time, json, csv, queue, traceback, threading, subprocess, tempfile, importlib, gc
@@ -1284,7 +1239,7 @@ def _proc_transcribe_entry(job: dict, out_q):
         os.environ["OPENBLAS_NUM_THREADS"] = str(threads)
         os.environ["NUMEXPR_NUM_THREADS"]  = str(threads)
 
-        out_q.put(("log", f"[Transcribe] loading (mode={os.getenv('TRANSOFF_MODE','max')}, threads={threads}, workers=1)"))
+        out_q.put(("log", f"[Transcribe] loading (threads={threads}, workers=1)"))
 
         model=WhisperModel(
             str(model_dir),
@@ -1679,7 +1634,7 @@ def _merge_by_speaker_word_level(self, segments):
                 if seg_end is not None: curr["end"]=seg_end
                 curr["tokens"].append(" " + seg_txt)
     if curr is not None: utterances.append(curr)
-    spk_map=self._speaker_id_map(speakers_seen)
+    spk_map=self._speaker_id_map(speakers_in_order=speakers_seen)
     out=[]
     for u in utterances:
         sid=spk_map.get(u["speaker"],0); label=f"Speaker{sid:02d}"
@@ -2045,7 +2000,6 @@ class _LlamaOnceMinimal:
         try:
             os.add_dll_directory(str(_llama_vendor_dir()))
         except Exception:
-            # Older Python might not have add_dll_directory; PATH from env should still work
             pass
 
         with self._lock:
@@ -2146,7 +2100,7 @@ def _llm_run_over_outputs(self, task: str, custom_prompt: str | None = None):
     def _worker():
         setattr(self, "_llm_busy", True)
         threads, _ = _recommended_threads()
-        self._post("log", f"[LLM] starting (mode={os.getenv('TRANSOFF_MODE','max')}, threads={threads})")
+        self._post("log", f"[LLM] starting (threads={threads})")
         try:
             runner = _LlamaOnceMinimal()
 
@@ -2177,7 +2131,6 @@ def _llm_run_over_outputs(self, task: str, custom_prompt: str | None = None):
             except Exception:
                 rep_pen = 1.12
 
-            # run exactly like before, just with the extra sampling args
             runner.run_to_file(
                 prompt,
                 out_path,
@@ -2195,7 +2148,6 @@ def _llm_run_over_outputs(self, task: str, custom_prompt: str | None = None):
         except Exception as e:
             self._post("log", f"[LLM] error: {e}")
         finally:
-            setattr(self, "_lll_busy", False)  # minor typo safe-guard
             setattr(self, "_llm_busy", False)
 
     threading.Thread(target=_worker, daemon=True).start()
