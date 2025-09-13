@@ -1,4 +1,4 @@
-# Transcribe Offline v1.2
+# Transcribe Offline v1.1
 
 **Transcribe Offline** is a desktop application that allows you to transcribe audio and video fully offline,
 with optional speaker diarization and word-level alignment. It can also generate subtitles and integrate
