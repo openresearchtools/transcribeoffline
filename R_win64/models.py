@@ -19,24 +19,27 @@ os.environ["HF_HOME"] = str(MODELS_DIR)
 os.environ["HUGGINGFACE_HUB_CACHE"] = str(MODELS_DIR)
 os.environ["TRANSFORMERS_CACHE"] = str(MODELS_DIR)
 
+# Try to use your app icon if present
+ICON_PATH = APP_ROOT / "content" / "AppIcon.ico"
+
 # ---------------- Model list (checkbox items) ----------------
 # Each entry: ui_name, repo, local_subdir, gated(bool), include(list), exclude(list), blurb
 MODEL_ITEMS = [
     {
-        "ui": "Faster-Whisper Large V3 Turbo (speech-to-text, fast ASR)",
+        "ui": "Faster-Whisper Large V3 Turbo — Speech-to-Text (fast ASR)",
         "repo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
         "subdir": "mobiuslabsgmbh__faster-whisper-large-v3-turbo",
         "gated": False,
         "include": [],
         "exclude": [],
-        "blurb": "High-speed Whisper variant for accurate, fast transcription."
+        "blurb": "Fast, accurate Whisper variant for transcription."
     },
     {
-        "ui": "wav2vec2 Base 960h (ASR backbone/features)",
+        "ui": "wav2vec2 Base 960h — ASR backbone/features (Meta/FAIR)",
         "repo": "facebook/wav2vec2-base-960h",
         "subdir": "facebook__wav2vec2-base-960h",
         "gated": False,
-        # Grab classic PyTorch bin + tokenizer/config files
+        # Grab classic PyTorch .bin + tokenizer/config files (skip other weight formats)
         "include": [
             "pytorch_model.bin", "*.bin",
             "vocab.json", "tokenizer.json", "tokenizer_config.json",
@@ -44,18 +47,17 @@ MODEL_ITEMS = [
             "preprocessor_config.json", "feature_extractor_config.json",
             "*.json", "*.txt"
         ],
-        # Explicitly avoid alternative weight formats present in the repo
         "exclude": ["*.safetensors", "*.h5", "*.ckpt"],
-        "blurb": "LibriSpeech 960h ASR model using .bin weights and tokenizer/config files."
+        "blurb": "LibriSpeech 960h model; downloads .bin weights + tokenizer/config files."
     },
     {
-        "ui": "WeSpeaker VoxCeleb ResNet34 + LM (speaker embeddings)",
+        "ui": "WeSpeaker VoxCeleb ResNet34 + LM — Speaker Embeddings",
         "repo": "pyannote/wespeaker-voxceleb-resnet34-LM",
         "subdir": "pyannote__wespeaker-voxceleb-resnet34-LM",
         "gated": False,
         "include": [],
         "exclude": [],
-        "blurb": "Speaker representation model; helps recognize who is speaking."
+        "blurb": "Speaker representation model (helps tell who is speaking)."
     },
     {
         "ui": "Segmentation 3.0 (pyannote) — GATED",
@@ -64,7 +66,7 @@ MODEL_ITEMS = [
         "gated": True,
         "include": [],
         "exclude": [],
-        "blurb": "Detects speech segments; requires accepting terms (token)."
+        "blurb": "Detects speech segments. Requires accepting terms and using a token."
     },
     {
         "ui": "Speaker Diarization 3.1 (pyannote) — GATED",
@@ -73,97 +75,84 @@ MODEL_ITEMS = [
         "gated": True,
         "include": [],
         "exclude": [],
-        "blurb": "Who-spoke-when pipeline; requires access approval (token)."
+        "blurb": "Who-spoke-when pipeline. Requires access approval and token."
     },
     {
-        "ui": "Qwen3-4B Instruct (GGUF Q4_K_M) (LLM for notes/QA)",
+        "ui": "Qwen3-4B Instruct (GGUF Q4_K_M) — Local LLM for notes/QA",
         "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
         "subdir": "unsloth__Qwen3-4B-Instruct-2507-GGUF",
         "gated": False,
         "include": ["Qwen3-4B-Instruct-2507-Q4_K_M.gguf"],
         "exclude": [],
-        "blurb": "Compact local assistant model for llama.cpp (GGUF)."
-    },
-    {
-        "ui": "Silero VAD (voice activity detector)",
-        "repo": "snakers4/silero-vad",
-        "subdir": ".",  # will place silero_vad.jit directly in content/models
-        "gated": False,
-        "include": ["silero_vad.jit"],
-        "exclude": [],
-        "blurb": "Lightweight VAD to detect speech vs. silence."
-    },
+        "blurb": "Compact assistant model for llama.cpp in GGUF format."
+    }
 ]
 
-# ---------------- Help links & explanations ----------------
-HELP_LINKS = [
-    ("Why some models are gated (access tokens)",
-     "https://huggingface.co/docs/hub/models-gated"),
-    ("Create a free Hugging Face account",
-     "https://huggingface.co/join"),
-    ("Create / view your access tokens",
-     "https://huggingface.co/settings/tokens"),
-    ("Request access: pyannote/segmentation-3.0",
-     "https://huggingface.co/pyannote/segmentation-3.0"),
-    ("Request access: pyannote/speaker-diarization-3.1",
-     "https://huggingface.co/pyannote/speaker-diarization-3.1"),
+# ---------------- Help text & links ----------------
+TOP_NOTE = (
+    "Some models below (the pyannote ones) are free/open for research & community use but are "
+    "gated so the authors can track usage and report impact in grants. Paste your token only if "
+    "you select those gated models; everything else downloads anonymously."
+)
+
+HELP_STEPS = [
+    ("1) Create a free Hugging Face account", "https://huggingface.co/join"),
+    ("2) Request access: pyannote/segmentation-3.0", "https://huggingface.co/pyannote/segmentation-3.0"),
+    ("2) Request access: pyannote/speaker-diarization-3.1", "https://huggingface.co/pyannote/speaker-diarization-3.1"),
+    ("3) Create / view your access tokens", "https://huggingface.co/settings/tokens"),
 ]
 
 # ---------------- CLI detection ----------------
 def find_hf_cli():
     """
-    Returns (cmd_list, is_python_module) for invoking the Hugging Face CLI.
+    Returns (cmd_list) for invoking the Hugging Face CLI.
     Tries huggingface-cli executable, else python -m huggingface_hub.cli .
     """
-    candidates = []
-
-    # direct executable on PATH
-    candidates.append(("huggingface-cli", False))
-
-    # same dir as current python (Windows Scripts)
     py = Path(sys.executable)
-    scripts_dir = py.parent
-    cand1 = scripts_dir / "huggingface-cli.exe"
-    cand2 = scripts_dir / "huggingface-cli"
-    if cand1.exists():
-        candidates.insert(0, (str(cand1), False))
-    elif cand2.exists():
-        candidates.insert(0, (str(cand2), False))
-
-    # python -m fallback
-    candidates.append(([sys.executable, "-m", "huggingface_hub.cli"], True))
-
-    for cand, is_mod in candidates:
+    candidates = [
+        [str(py.parent / "huggingface-cli.exe")],
+        [str(py.parent / "huggingface-cli")],
+        ["huggingface-cli"],
+        [sys.executable, "-m", "huggingface_hub.cli"],
+    ]
+    for cand in candidates:
         try:
-            test_cmd = (cand + ["--help"]) if isinstance(cand, list) else [cand, "--help"]
-            subprocess.run(test_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
-            return (cand if isinstance(cand, list) else [cand], is_mod)
+            subprocess.run(cand + ["--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            return cand
         except Exception:
             continue
-    return (None, False)
+    return None
 
-HF_CMD, HF_CMD_IS_MOD = find_hf_cli()
+HF_CMD = find_hf_cli()
 
 # ---------------- GUI ----------------
 class ModelDownloaderGUI(tk.Tk):
     def __init__(self):
         super().__init__()
+
         self.title("Transcribe Offline — Model Downloader")
-        self.geometry("910x640")
-        self.minsize(880, 580)
+        try:
+            if ICON_PATH.exists():
+                self.iconbitmap(default=str(ICON_PATH))
+        except Exception:
+            pass
+
+        self.geometry("980x720")
+        self.minsize(940, 660)
 
         self.queue = queue.Queue()
         self.downloading = False
 
         self._build_header()
-        self._build_links()
-        self._build_token_and_dest()
+        self._build_notice_and_links()
+        self._build_token()
         self._build_model_list()
         self._build_actions()
         self._build_log()
+        self._build_footer()
 
         self._ui_set_status("Ready.")
-        self.after(100, self._poll_queue)
+        self.after(80, self._poll_queue)
 
     # --- UI builders ---
     def _open_url(self, url):
@@ -171,61 +160,65 @@ class ModelDownloaderGUI(tk.Tk):
 
     def _build_header(self):
         frm = ttk.Frame(self)
-        frm.pack(fill="x", padx=12, pady=(10, 4))
-        title = ttk.Label(frm, text="Download Required Models", font=("Segoe UI", 14, "bold"))
-        title.pack(side="left")
-        ttk.Label(frm, text=f"Destination: {MODELS_DIR}", foreground="#444").pack(side="right")
+        frm.pack(fill="x", padx=12, pady=(10, 6))
+        left = ttk.Frame(frm); left.pack(side="left", fill="x", expand=True)
+        ttk.Label(left, text="Download Required Models", font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        ttk.Label(left, text=f"Destination: {MODELS_DIR}", foreground="#444").pack(anchor="w", pady=(3,0))
 
-    def _build_links(self):
-        box = ttk.LabelFrame(self, text="Why some models are gated & where to get a token")
+    def _build_notice_and_links(self):
+        box = ttk.LabelFrame(self, text="Before you start")
         box.pack(fill="x", padx=12, pady=6)
-        for text, url in HELP_LINKS:
-            l = ttk.Label(box, text=f"• {text}", foreground="#0a53a3", cursor="hand2")
-            l.pack(anchor="w", padx=8, pady=2)
-            l.bind("<Button-1>", lambda e, u=url: self._open_url(u))
-        desc = (
-            "Some models (the pyannote ones below) are free and open for research/community use, "
-            "but are gated so the authors can understand usage and report impact in future grants. "
-            "You only need a token for those gated models. Everything else downloads anonymously."
-        )
-        ttk.Label(box, text=desc, wraplength=860, justify="left").pack(anchor="w", padx=8, pady=(6, 4))
+        ttk.Label(box, text=TOP_NOTE, wraplength=930, justify="left").pack(anchor="w", padx=10, pady=(8,6))
 
-    def _build_token_and_dest(self):
+        links = ttk.Frame(box); links.pack(fill="x", padx=4, pady=(0,8))
+        for text, url in HELP_STEPS:
+            lbl = ttk.Label(links, text=f"• {text}", foreground="#0a53a3", cursor="hand2")
+            lbl.pack(anchor="w", padx=8, pady=2)
+            lbl.bind("<Button-1>", lambda e, u=url: self._open_url(u))
+
+    def _build_token(self):
         frm = ttk.Frame(self)
-        frm.pack(fill="x", padx=12, pady=(2, 6))
-        ttk.Label(frm, text="Hugging Face Token (used only for gated models):").grid(row=0, column=0, sticky="w")
+        frm.pack(fill="x", padx=12, pady=(2, 8))
+        ttk.Label(frm, text="Hugging Face Token (only for 🔒 gated models):").grid(row=0, column=0, sticky="w")
         self.token_var = tk.StringVar()
-        token_entry = ttk.Entry(frm, textvariable=self.token_var, width=60)
-        token_entry.grid(row=0, column=1, sticky="w", padx=(6, 0))
-        self.show_token = tk.BooleanVar(value=False)
+        self._token_entry = ttk.Entry(frm, textvariable=self.token_var, width=58)
+        self._token_entry.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        self._show_token = tk.BooleanVar(value=False)
+
         def toggle_show():
-            token_entry.config(show="" if self.show_token.get() else "•")
-        ttk.Checkbutton(frm, text="Show", variable=self.show_token, command=toggle_show)\
+            self._token_entry.config(show="" if self._show_token.get() else "•")
+        ttk.Checkbutton(frm, text="Show", variable=self._show_token, command=toggle_show)\
             .grid(row=0, column=2, sticky="w", padx=8)
-        token_entry.config(show="•")
+        self._token_entry.config(show="•")
 
     def _build_model_list(self):
-        box = ttk.LabelFrame(self, text="Models to install (choose)")
-        box.pack(fill="both", expand=False, padx=12, pady=6)
+        box = ttk.LabelFrame(self, text="Models to install")
+        box.pack(fill="both", padx=12, pady=6)
+
+        # Scrollable area for model items
+        canvas = tk.Canvas(box, height=220, borderwidth=0, highlightthickness=0)
+        vbar = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        inner = ttk.Frame(canvas)
+
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0,0), window=inner, anchor="nw")
+        canvas.pack(side="left", fill="both", expand=True)
+        vbar.pack(side="right", fill="y")
 
         self.vars = []
-        header = ttk.Frame(box); header.pack(fill="x", padx=6, pady=(4, 2))
-        ttk.Label(header, text="Select", width=8).grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="Model",  width=42).grid(row=0, column=1, sticky="w")
-        ttk.Label(header, text="Notes",  width=60).grid(row=0, column=2, sticky="w")
-
         for item in MODEL_ITEMS:
-            row = ttk.Frame(box); row.pack(fill="x", padx=6, pady=2)
+            row = ttk.Frame(inner)
+            row.pack(fill="x", padx=8, pady=6)
+
             var = tk.BooleanVar(value=True)
             self.vars.append(var)
-            ttk.Checkbutton(row, variable=var, width=8).grid(row=0, column=0, sticky="w")
-            name = item["ui"] + ("  🔒" if item["gated"] else "")
-            ttk.Label(row, text=name, width=42, anchor="w").grid(row=0, column=1, sticky="w")
-            ttk.Label(row, text=item["blurb"], width=60, anchor="w").grid(row=0, column=2, sticky="w")
+            ttk.Checkbutton(row, variable=var).grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0,8), pady=(2,0))
 
-        ttk.Label(box,
-                  text="🔒 requires you to paste a Hugging Face token (access is free after accepting terms).",
-                  foreground="#555").pack(anchor="w", padx=6, pady=(4, 4))
+            name = item["ui"] + ("  🔒" if item["gated"] else "")
+            ttk.Label(row, text=name, font=("Segoe UI", 10, "bold")).grid(row=0, column=1, sticky="w")
+            ttk.Label(row, text=item["blurb"], foreground="#555", wraplength=820, justify="left")\
+                .grid(row=1, column=1, sticky="w", pady=(2,0))
 
     def _build_actions(self):
         frm = ttk.Frame(self)
@@ -235,27 +228,77 @@ class ModelDownloaderGUI(tk.Tk):
         ttk.Button(frm, text="Close", command=self.destroy).pack(side="right")
 
     def _build_log(self):
-        box = ttk.LabelFrame(self, text="Log")
-        box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        self.txt = tk.Text(box, wrap="word", height=18)
+        box = ttk.LabelFrame(self, text="Log (live output from huggingface-cli)")
+        box.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        self.txt = tk.Text(box, wrap="none", height=16)
         self.txt.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(box, command=self.txt.yview)
         sb.pack(side="right", fill="y")
         self.txt.configure(yscrollcommand=sb.set)
         self._log_banner()
 
+    def _build_footer(self):
+        frm = ttk.Frame(self)
+        frm.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Label(frm, text="After downloads, start the app from RStudio by sourcing:", foreground="#444")\
+            .pack(anchor="w")
+        launch_cmd = "source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'))"
+        self.launch_cmd = launch_cmd
+        lbl = ttk.Label(frm, text=launch_cmd, font=("Consolas", 9))
+        lbl.pack(anchor="w", pady=(2, 6))
+
+        btns = ttk.Frame(frm); btns.pack(fill="x")
+        ttk.Button(btns, text="Copy launch command", command=self._copy_launch_command).pack(side="left")
+        ttk.Button(btns, text="Open project folder", command=lambda: os.startfile(APP_ROOT)).pack(side="left", padx=8)
+        ttk.Button(btns, text="Launch app now (Windows)", command=self._launch_runner_now).pack(side="left", padx=8)
+
     # --- helpers ---
+    def _copy_launch_command(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.launch_cmd)
+        self.update()
+        messagebox.showinfo("Copied", "Launch command copied to clipboard.")
+
+    def _launch_runner_now(self):
+        try:
+            runner = APP_ROOT / "run_transcribe_offline.R"
+            if not runner.exists():
+                messagebox.showerror("Not found", f"Could not find:\n{runner}\nRun setup to generate it.")
+                return
+            # Windows: open with default associated app (usually RStudio)
+            os.startfile(str(runner))
+        except Exception as e:
+            messagebox.showerror("Error launching", f"Could not launch the runner:\n{e}")
+
     def _log_banner(self):
         self.txt.insert("end",
-            "This window streams the Hugging Face CLI output, including file sizes and speeds when available.\n"
+            "This window streams the raw Hugging Face CLI output (including file sizes and speeds).\n"
             f"Destination folder: {MODELS_DIR}\n\n")
         self.txt.see("end")
 
     def _ui_set_status(self, msg):
         self.title(f"Transcribe Offline — Model Downloader   [{msg}]")
 
-    def log(self, *parts):
-        self.txt.insert("end", " ".join(str(p) for p in parts) + "\n")
+    def _log_replace_last_line(self, new_text):
+        # Replace last line content (used for carriage-return updates)
+        last_index = self.txt.index("end-1c linestart")
+        self.txt.delete(last_index, "end-1c")
+        self.txt.insert("end", new_text)
+
+    def log(self, text):
+        # Handle \r-updating lines from tqdm/CLI: keep last line updating in place
+        if "\r" in text:
+            seg = text.split("\r")[-1]
+            if "\n" in seg:
+                parts = seg.split("\n")
+                for p in parts[:-1]:
+                    self.txt.insert("end", p + "\n")
+                self._log_replace_last_line(parts[-1])
+                self.txt.insert("end", "\n")
+            else:
+                self._log_replace_last_line(seg)
+        else:
+            self.txt.insert("end", text + "\n")
         self.txt.see("end")
 
     # --- actions ---
@@ -311,24 +354,6 @@ class ModelDownloaderGUI(tk.Tk):
                     env["HUGGINGFACE_HUB_TOKEN"] = token
 
                 self._run_cli_stream(args, env)
-
-                # Special case: put silero_vad.jit directly under content/models
-                if item["repo"] == "snakers4/silero-vad":
-                    src = next(local_dir.glob("silero_vad.jit"), None)
-                    if src:
-                        dst = MODELS_DIR / "silero_vad.jit"
-                        try:
-                            if dst.exists():
-                                dst.unlink()
-                            src.replace(dst)
-                            try:
-                                local_dir.rmdir()
-                            except OSError:
-                                pass
-                            self.queue.put(("log", f"Placed: {dst}"))
-                        except Exception as e:
-                            self.queue.put(("log", f"Note: could not move silero_vad.jit: {e}"))
-
                 self.queue.put(("log", f"✓ Done: {item['ui']}"))
 
             except Exception as e:
@@ -338,17 +363,20 @@ class ModelDownloaderGUI(tk.Tk):
 
     def _run_cli_stream(self, args, env):
         cmd = HF_CMD + args
-        self.queue.put(("log", "Running:", " ".join(shlex.quote(a) for a in cmd)))
+        self.queue.put(("log", "Running: " + " ".join(shlex.quote(a) for a in cmd)))
+
+        # text=True ensures universal_newlines; bufsize=1 + -u on python helps line-buffering.
         with subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            bufsize=1,
             universal_newlines=True,
             encoding="utf-8",
             env=env
         ) as proc:
-            for line in proc.stdout:
-                self.queue.put(("log", line.rstrip()))
+            for raw in proc.stdout:
+                self.queue.put(("raw", raw))
             ret = proc.wait()
             if ret != 0:
                 raise RuntimeError(f"huggingface-cli exited with code {ret}")
@@ -359,6 +387,8 @@ class ModelDownloaderGUI(tk.Tk):
                 kind, payload = self.queue.get_nowait()
                 if kind == "log":
                     self.log(payload)
+                elif kind == "raw":
+                    self.log(payload.rstrip("\n"))
                 elif kind == "done":
                     self.downloading = False
                     self.btn_download.config(state="normal")
@@ -367,7 +397,7 @@ class ModelDownloaderGUI(tk.Tk):
                 self.queue.task_done()
         except queue.Empty:
             pass
-        self.after(100, self._poll_queue)
+        self.after(80, self._poll_queue)
 
 
 def main():
