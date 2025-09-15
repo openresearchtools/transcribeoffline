@@ -37,8 +37,7 @@ MODEL_ITEMS = [
         "repo": "facebook/wav2vec2-base-960h",
         "subdir": "facebook__wav2vec2-base-960h",
         "gated": False,
-        "include": [],  # no include filters
-        "exclude": ["*.safetensors", "*.h5"],  # only exclude these
+        "exclude": ["model.safetensors", "*.h5"],  # only exclude these
         "markers": ["pytorch_model.bin"],  # simple & reliable
         "blurb": "Model used for word-level alignment (English)."
     },
