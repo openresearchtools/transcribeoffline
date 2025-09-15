@@ -102,28 +102,9 @@ HELP_STEPS = [
     ("3) Create / view your access tokens", "https://huggingface.co/settings/tokens"),
 ]
 
-# ---------------- CLI detection ----------------
-def find_hf_cli():
-    """
-    Returns (cmd_list) for invoking the Hugging Face CLI.
-    Tries huggingface-cli executable, else python -m huggingface_hub.cli .
-    """
-    py = Path(sys.executable)
-    candidates = [
-        [str(py.parent / "huggingface-cli.exe")],
-        [str(py.parent / "huggingface-cli")],
-        ["huggingface-cli"],
-        [sys.executable, "-m", "huggingface_hub.cli"],
-    ]
-    for cand in candidates:
-        try:
-            subprocess.run(cand + ["--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
-            return cand
-        except Exception:
-            continue
-    return None
-
-HF_CMD = find_hf_cli()
+# ---------------- Use the modern Hugging Face CLI ----------------
+# If 'hf' isn't on PATH, this will error later with a clear message.
+HF_CMD = ["hf"]
 
 # ---------------- GUI ----------------
 class ModelDownloaderGUI(tk.Tk):
@@ -228,7 +209,7 @@ class ModelDownloaderGUI(tk.Tk):
         ttk.Button(frm, text="Close", command=self.destroy).pack(side="right")
 
     def _build_log(self):
-        box = ttk.LabelFrame(self, text="Log (live output from huggingface-cli)")
+        box = ttk.LabelFrame(self, text="Log (live output from hf / CLI)")
         box.pack(fill="both", expand=True, padx=12, pady=(0, 6))
         self.txt = tk.Text(box, wrap="none", height=16)
         self.txt.pack(side="left", fill="both", expand=True)
@@ -265,8 +246,7 @@ class ModelDownloaderGUI(tk.Tk):
             if not runner.exists():
                 messagebox.showerror("Not found", f"Could not find:\n{runner}\nRun setup to generate it.")
                 return
-            # Windows: open with default associated app (usually RStudio)
-            os.startfile(str(runner))
+            os.startfile(str(runner))  # Windows: open with default .R handler (usually RStudio)
         except Exception as e:
             messagebox.showerror("Error launching", f"Could not launch the runner:\n{e}")
 
@@ -280,7 +260,6 @@ class ModelDownloaderGUI(tk.Tk):
         self.title(f"Transcribe Offline — Model Downloader   [{msg}]")
 
     def _log_replace_last_line(self, new_text):
-        # Replace last line content (used for carriage-return updates)
         last_index = self.txt.index("end-1c linestart")
         self.txt.delete(last_index, "end-1c")
         self.txt.insert("end", new_text)
@@ -317,12 +296,15 @@ class ModelDownloaderGUI(tk.Tk):
                                    "You selected gated models (pyannote). Paste your Hugging Face token first.")
             return
 
-        if HF_CMD is None:
-            messagebox.showerror("huggingface-cli not found",
-                                 "The Hugging Face CLI could not be located.\n"
-                                 "Install it into the same Python used by the app:\n\n"
-                                 "python -m pip install huggingface_hub\n\n"
-                                 "Then run this downloader again.")
+        # quick sanity check for 'hf'
+        try:
+            subprocess.run(HF_CMD + ["--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        except Exception:
+            messagebox.showerror(
+                "Hugging Face CLI not found",
+                "The 'hf' CLI was not found on PATH.\n\n"
+                "Install/upgrade into this Python:\n  python -m pip install --upgrade huggingface_hub"
+            )
             return
 
         self.downloading = True
@@ -362,10 +344,9 @@ class ModelDownloaderGUI(tk.Tk):
         self.queue.put(("done", None))
 
     def _run_cli_stream(self, args, env):
-        cmd = HF_CMD + args
+        cmd = HF_CMD + args  # uses 'hf download'
         self.queue.put(("log", "Running: " + " ".join(shlex.quote(a) for a in cmd)))
 
-        # text=True ensures universal_newlines; bufsize=1 + -u on python helps line-buffering.
         with subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -379,7 +360,7 @@ class ModelDownloaderGUI(tk.Tk):
                 self.queue.put(("raw", raw))
             ret = proc.wait()
             if ret != 0:
-                raise RuntimeError(f"huggingface-cli exited with code {ret}")
+                raise RuntimeError(f"hf exited with code {ret}")
 
     def _poll_queue(self):
         try:
@@ -401,12 +382,14 @@ class ModelDownloaderGUI(tk.Tk):
 
 
 def main():
-    if HF_CMD is None:
-        print("Warning: huggingface-cli not found. Install with:")
-        print("  python -m pip install huggingface_hub")
+    # Optional: warn in console if hf missing
+    try:
+        subprocess.run(HF_CMD + ["--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+    except Exception:
+        print("Warning: 'hf' CLI not found. Install with:")
+        print("  python -m pip install --upgrade huggingface_hub")
     app = ModelDownloaderGUI()
     app.mainloop()
 
 if __name__ == "__main__":
     main()
-
