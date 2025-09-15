@@ -220,7 +220,7 @@ class ModelDownloaderGUI(tk.Tk):
     def _build_footer(self):
         frm = ttk.Frame(self)
         frm.pack(fill="x", padx=12, pady=(0, 12))
-        ttk.Label(frm, text="After downloads, start the app from RStudio by sourcing:", foreground="#444")\
+        ttk.Label(frm, text="After downloads, start the app from RStudio by running run_transcribe_offline.R", foreground="#444")\
             .pack(anchor="w")
         launch_cmd = "source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'))"
         self.launch_cmd = launch_cmd
@@ -332,6 +332,7 @@ class ModelDownloaderGUI(tk.Tk):
                     args.extend(["--exclude", exc])
 
                 env = os.environ.copy()
+                env["PYTHONUNBUFFERED"] = "1"  # help streaming from Python-based CLIs
                 if item["gated"]:
                     env["HF_TOKEN"] = token
                     env["HUGGINGFACE_HUB_TOKEN"] = token
@@ -345,6 +346,7 @@ class ModelDownloaderGUI(tk.Tk):
         self.queue.put(("done", None))
 
     def _run_cli_stream(self, args, env):
+        # Stream character-by-character so carriage-return progress bars are visible
         cmd = HF_CMD + args  # uses 'hf download'
         self.queue.put(("log", "Running: " + " ".join(shlex.quote(a) for a in cmd)))
 
@@ -352,13 +354,32 @@ class ModelDownloaderGUI(tk.Tk):
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            bufsize=1,
-            universal_newlines=True,
-            encoding="utf-8",
+            bufsize=0,                # unbuffered (binary mode)
+            universal_newlines=False, # read bytes so we can process \r smoothly
             env=env
         ) as proc:
-            for raw in proc.stdout:
-                self.queue.put(("raw", raw))
+            buf = bytearray()
+            while True:
+                chunk = proc.stdout.read(1)
+                if not chunk:
+                    break
+                buf += chunk
+                # Flush on CR or LF so progress bars update
+                if chunk in (b"\r", b"\n"):
+                    try:
+                        text = buf.decode("utf-8", errors="replace")
+                    except Exception:
+                        text = buf.decode(errors="replace")
+                    self.queue.put(("raw", text))
+                    buf.clear()
+            # Flush any tail bytes
+            if buf:
+                try:
+                    text = buf.decode("utf-8", errors="replace")
+                except Exception:
+                    text = buf.decode(errors="replace")
+                self.queue.put(("raw", text))
+
             ret = proc.wait()
             if ret != 0:
                 raise RuntimeError(f"hf exited with code {ret}")
@@ -370,7 +391,11 @@ class ModelDownloaderGUI(tk.Tk):
                 if kind == "log":
                     self.log(payload)
                 elif kind == "raw":
-                    self.log(payload.rstrip("\n"))
+                    # payload may contain '\r' updates; don't strip
+                    # ensure each update gets rendered
+                    for seg in payload.splitlines(True):  # keepends=True
+                        # if line ends with CR only, log() will treat it as progress
+                        self.log(seg)
                 elif kind == "done":
                     self.downloading = False
                     self.btn_download.config(state="normal")
@@ -394,3 +419,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
