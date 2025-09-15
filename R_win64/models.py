@@ -103,8 +103,7 @@ HELP_STEPS = [
 ]
 
 # ---------------- Use the modern Hugging Face CLI ----------------
-# If 'hf' isn't on PATH, this will error later with a clear message.
-HF_CMD = ["hf"]
+HF_CMD = ["hf"]  # assumes 'hf' is available on PATH (huggingface_hub dependency installed)
 
 # ---------------- GUI ----------------
 class ModelDownloaderGUI(tk.Tk):
@@ -230,7 +229,7 @@ class ModelDownloaderGUI(tk.Tk):
 
         btns = ttk.Frame(frm); btns.pack(fill="x")
         ttk.Button(btns, text="Copy launch command", command=self._copy_launch_command).pack(side="left")
-        ttk.Button(btns, text="Open project folder", command=lambda: os.startfile(APP_ROOT)).pack(side="left", padx=8)
+        ttk.Button(btns, text="Open project folder", command=lambda: os.startfile(str(APP_ROOT))).pack(side="left", padx=8)
         ttk.Button(btns, text="Launch app now (Windows)", command=self._launch_runner_now).pack(side="left", padx=8)
 
     # --- helpers ---
@@ -320,11 +319,13 @@ class ModelDownloaderGUI(tk.Tk):
                 local_dir = MODELS_DIR / (item["subdir"] if item["subdir"] != "." else "")
                 local_dir.mkdir(parents=True, exist_ok=True)
 
-                args = ["download", item["repo"],
-                        "--revision", "main",
-                        "--local-dir", str(local_dir),
-                        "--local-dir-use-symlinks", "False"]
-
+                # Build 'hf download' args (no --local-dir-use-symlinks in new CLI)
+                args = [
+                    "download",
+                    item["repo"],
+                    "--revision", "main",
+                    "--local-dir", str(local_dir)
+                ]
                 for inc in item.get("include", []) or []:
                     args.extend(["--include", inc])
                 for exc in item.get("exclude", []) or []:
