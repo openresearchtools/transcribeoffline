@@ -24,7 +24,6 @@ os.environ["TRANSFORMERS_CACHE"] = str(MODELS_DIR)
 ICON_PATH = APP_ROOT / "content" / "AppIcon.ico"
 
 # ---------------- Model list (checkbox items) ----------------
-# Each entry: ui_name, repo, local_subdir, gated(bool), include(list), exclude(list), blurb
 MODEL_ITEMS = [
     {
         "ui": "Faster-Whisper Large V3 Turbo — Speech-to-Text (fast ASR)",
@@ -40,7 +39,6 @@ MODEL_ITEMS = [
         "repo": "facebook/wav2vec2-base-960h",
         "subdir": "facebook__wav2vec2-base-960h",
         "gated": False,
-        # Grab classic PyTorch .bin + tokenizer/config files (skip other weight formats)
         "include": [
             "pytorch_model.bin", "*.bin",
             "vocab.json", "tokenizer.json", "tokenizer_config.json",
@@ -104,7 +102,7 @@ HELP_STEPS = [
 ]
 
 # ---------------- Use the modern Hugging Face CLI ----------------
-HF_CMD = ["hf"]  # assumes 'hf' is available on PATH (huggingface_hub installed)
+HF_CMD = ["hf"]  # requires 'huggingface_hub' providing the 'hf' entrypoint
 
 # ---------------- GUI ----------------
 class ModelDownloaderGUI(tk.Tk):
@@ -118,9 +116,9 @@ class ModelDownloaderGUI(tk.Tk):
         except Exception:
             pass
 
-        # Fixed window that shows footer without maximizing
+        # Fixed window so footer is visible without maximizing
         self.geometry("1024x760")
-        self.minsize(1024, 760)  # stable layout regardless of screen DPI
+        self.minsize(1024, 760)
         self.configure(padx=10, pady=8)
 
         self.queue = queue.Queue()
@@ -227,34 +225,13 @@ class ModelDownloaderGUI(tk.Tk):
     def _build_footer(self):
         frm = ttk.Frame(self)
         frm.pack(fill="x", pady=(0, 6))
-        ttk.Label(frm, text="After downloads, start the app from RStudio by sourcing:", foreground="#444")\
-            .pack(anchor="w")
-        launch_cmd = "source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'))"
-        self.launch_cmd = launch_cmd
-        ttk.Label(frm, text=launch_cmd, font=("Consolas", 9)).pack(anchor="w", pady=(2, 6))
-
-        btns = ttk.Frame(frm); btns.pack(fill="x")
-        ttk.Button(btns, text="Copy launch command", command=self._copy_launch_command).pack(side="left")
-        ttk.Button(btns, text="Open project folder", command=lambda: os.startfile(str(APP_ROOT))).pack(side="left", padx=8)
-        ttk.Button(btns, text="Launch app now (Windows)", command=self._launch_runner_now).pack(side="left", padx=8)
+        ttk.Label(
+            frm,
+            text="After downloads, start the app from RStudio using: run_transcribe_offline.R",
+            foreground="#444"
+        ).pack(anchor="w")
 
     # --- helpers ---
-    def _copy_launch_command(self):
-        self.clipboard_clear()
-        self.clipboard_append(self.launch_cmd)
-        self.update()
-        messagebox.showinfo("Copied", "Launch command copied to clipboard.")
-
-    def _launch_runner_now(self):
-        try:
-            runner = APP_ROOT / "run_transcribe_offline.R"
-            if not runner.exists():
-                messagebox.showerror("Not found", f"Could not find:\n{runner}\nRun setup to generate it.")
-                return
-            os.startfile(str(runner))  # Windows: open with default .R handler (usually RStudio)
-        except Exception as e:
-            messagebox.showerror("Error launching", f"Could not launch the runner:\n{e}")
-
     def _log_banner(self):
         self.txt.insert("end",
             "This window streams the raw Hugging Face CLI output (plus a heartbeat during large files).\n"
@@ -335,7 +312,7 @@ class ModelDownloaderGUI(tk.Tk):
                 local_dir = MODELS_DIR / (item["subdir"] if item["subdir"] != "." else "")
                 local_dir.mkdir(parents=True, exist_ok=True)
 
-                # Build 'hf download' args (no --local-dir-use-symlinks in new CLI)
+                # Build 'hf download' args
                 args = [
                     "download",
                     item["repo"],
@@ -370,7 +347,6 @@ class ModelDownloaderGUI(tk.Tk):
         for p in [local_dir / ".cache", local_dir / "refs"]:
             try:
                 if p.exists():
-                    # recursive remove
                     for root, dirs, files in os.walk(p, topdown=False):
                         for f in files:
                             try: os.remove(Path(root) / f)
@@ -392,8 +368,8 @@ class ModelDownloaderGUI(tk.Tk):
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            bufsize=1,                   # line-buffer if possible
-            universal_newlines=True,     # text mode
+            bufsize=1,
+            universal_newlines=True,
             encoding="utf-8",
             errors="replace",
             env=env
@@ -410,7 +386,6 @@ class ModelDownloaderGUI(tk.Tk):
             proc.stdout.close()
 
         def heartbeat():
-            # If no output for 0.7s, print a dot on the same line to show liveness
             spinner_line = ""
             while self._heartbeat_enabled and proc.poll() is None:
                 if time.time() - last_ping > 0.7:
@@ -440,7 +415,6 @@ class ModelDownloaderGUI(tk.Tk):
                 elif kind == "raw":
                     self.log(payload)
                 elif kind == "heartbeat":
-                    # overwrite last line with spinner/dots (no extra blank lines)
                     self._log_replace_last_line(payload)
                 elif kind == "done":
                     self.downloading = False
@@ -454,7 +428,6 @@ class ModelDownloaderGUI(tk.Tk):
 
 
 def main():
-    # Optional: warn in console if hf missing
     try:
         subprocess.run(HF_CMD + ["--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
     except Exception:
