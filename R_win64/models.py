@@ -4,6 +4,7 @@ import threading
 import subprocess
 import shlex
 import queue
+import time
 import webbrowser
 from pathlib import Path
 import tkinter as tk
@@ -35,7 +36,7 @@ MODEL_ITEMS = [
         "blurb": "Fast, accurate Whisper variant for transcription."
     },
     {
-        "ui": "wav2vec2 Base 960h — ASR backbone/features (Meta/FAIR)",
+        "ui": "wav2vec2 Base 960h — ASR backbone/features (Meta)",
         "repo": "facebook/wav2vec2-base-960h",
         "subdir": "facebook__wav2vec2-base-960h",
         "gated": False,
@@ -103,7 +104,7 @@ HELP_STEPS = [
 ]
 
 # ---------------- Use the modern Hugging Face CLI ----------------
-HF_CMD = ["hf"]  # assumes 'hf' is available on PATH (huggingface_hub dependency installed)
+HF_CMD = ["hf"]  # assumes 'hf' is available on PATH (huggingface_hub installed)
 
 # ---------------- GUI ----------------
 class ModelDownloaderGUI(tk.Tk):
@@ -117,11 +118,15 @@ class ModelDownloaderGUI(tk.Tk):
         except Exception:
             pass
 
-        self.geometry("980x720")
-        self.minsize(940, 660)
+        # Fixed window that shows footer without maximizing
+        self.geometry("1024x760")
+        self.minsize(1024, 760)  # stable layout regardless of screen DPI
+        self.configure(padx=10, pady=8)
 
         self.queue = queue.Queue()
         self.downloading = False
+        self._blank_count = 0
+        self._heartbeat_enabled = False
 
         self._build_header()
         self._build_notice_and_links()
@@ -140,17 +145,17 @@ class ModelDownloaderGUI(tk.Tk):
 
     def _build_header(self):
         frm = ttk.Frame(self)
-        frm.pack(fill="x", padx=12, pady=(10, 6))
+        frm.pack(fill="x", pady=(4, 8))
         left = ttk.Frame(frm); left.pack(side="left", fill="x", expand=True)
         ttk.Label(left, text="Download Required Models", font=("Segoe UI", 16, "bold")).pack(anchor="w")
         ttk.Label(left, text=f"Destination: {MODELS_DIR}", foreground="#444").pack(anchor="w", pady=(3,0))
 
     def _build_notice_and_links(self):
         box = ttk.LabelFrame(self, text="Before you start")
-        box.pack(fill="x", padx=12, pady=6)
-        ttk.Label(box, text=TOP_NOTE, wraplength=930, justify="left").pack(anchor="w", padx=10, pady=(8,6))
+        box.pack(fill="x", pady=6)
+        ttk.Label(box, text=TOP_NOTE, wraplength=980, justify="left").pack(anchor="w", padx=10, pady=(8,6))
 
-        links = ttk.Frame(box); links.pack(fill="x", padx=4, pady=(0,8))
+        links = ttk.Frame(box); links.pack(fill="x", padx=6, pady=(0,8))
         for text, url in HELP_STEPS:
             lbl = ttk.Label(links, text=f"• {text}", foreground="#0a53a3", cursor="hand2")
             lbl.pack(anchor="w", padx=8, pady=2)
@@ -158,7 +163,7 @@ class ModelDownloaderGUI(tk.Tk):
 
     def _build_token(self):
         frm = ttk.Frame(self)
-        frm.pack(fill="x", padx=12, pady=(2, 8))
+        frm.pack(fill="x", pady=(2, 8))
         ttk.Label(frm, text="Hugging Face Token (only for 🔒 gated models):").grid(row=0, column=0, sticky="w")
         self.token_var = tk.StringVar()
         self._token_entry = ttk.Entry(frm, textvariable=self.token_var, width=58)
@@ -173,17 +178,17 @@ class ModelDownloaderGUI(tk.Tk):
 
     def _build_model_list(self):
         box = ttk.LabelFrame(self, text="Models to install")
-        box.pack(fill="both", padx=12, pady=6)
+        box.pack(fill="x", pady=6)
 
-        # Scrollable area for model items
-        canvas = tk.Canvas(box, height=220, borderwidth=0, highlightthickness=0)
+        # Scrollable area for model items — fixed height so footer is always visible
+        canvas = tk.Canvas(box, height=200, borderwidth=0, highlightthickness=0)
         vbar = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=vbar.set)
         inner = ttk.Frame(canvas)
 
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0,0), window=inner, anchor="nw")
-        canvas.pack(side="left", fill="both", expand=True)
+        canvas.pack(side="left", fill="x", expand=True)
         vbar.pack(side="right", fill="y")
 
         self.vars = []
@@ -197,20 +202,22 @@ class ModelDownloaderGUI(tk.Tk):
 
             name = item["ui"] + ("  🔒" if item["gated"] else "")
             ttk.Label(row, text=name, font=("Segoe UI", 10, "bold")).grid(row=0, column=1, sticky="w")
-            ttk.Label(row, text=item["blurb"], foreground="#555", wraplength=820, justify="left")\
+            ttk.Label(row, text=item["blurb"], foreground="#555", wraplength=880, justify="left")\
                 .grid(row=1, column=1, sticky="w", pady=(2,0))
 
     def _build_actions(self):
         frm = ttk.Frame(self)
-        frm.pack(fill="x", padx=12, pady=6)
+        frm.pack(fill="x", pady=6)
         self.btn_download = ttk.Button(frm, text="Start Download", command=self.start_downloads)
         self.btn_download.pack(side="left")
         ttk.Button(frm, text="Close", command=self.destroy).pack(side="right")
 
     def _build_log(self):
         box = ttk.LabelFrame(self, text="Log (live output from hf / CLI)")
-        box.pack(fill="both", expand=True, padx=12, pady=(0, 6))
-        self.txt = tk.Text(box, wrap="none", height=16)
+        box.pack(fill="both", expand=True, pady=(0, 6))
+
+        # Fixed-height log so footer stays visible
+        self.txt = tk.Text(box, wrap="none", height=18)
         self.txt.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(box, command=self.txt.yview)
         sb.pack(side="right", fill="y")
@@ -219,13 +226,12 @@ class ModelDownloaderGUI(tk.Tk):
 
     def _build_footer(self):
         frm = ttk.Frame(self)
-        frm.pack(fill="x", padx=12, pady=(0, 12))
-        ttk.Label(frm, text="After downloads, start the app from RStudio by running run_transcribe_offline.R", foreground="#444")\
+        frm.pack(fill="x", pady=(0, 6))
+        ttk.Label(frm, text="After downloads, start the app from RStudio by sourcing:", foreground="#444")\
             .pack(anchor="w")
         launch_cmd = "source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'))"
         self.launch_cmd = launch_cmd
-        lbl = ttk.Label(frm, text=launch_cmd, font=("Consolas", 9))
-        lbl.pack(anchor="w", pady=(2, 6))
+        ttk.Label(frm, text=launch_cmd, font=("Consolas", 9)).pack(anchor="w", pady=(2, 6))
 
         btns = ttk.Frame(frm); btns.pack(fill="x")
         ttk.Button(btns, text="Copy launch command", command=self._copy_launch_command).pack(side="left")
@@ -251,7 +257,7 @@ class ModelDownloaderGUI(tk.Tk):
 
     def _log_banner(self):
         self.txt.insert("end",
-            "This window streams the raw Hugging Face CLI output (including file sizes and speeds).\n"
+            "This window streams the raw Hugging Face CLI output (plus a heartbeat during large files).\n"
             f"Destination folder: {MODELS_DIR}\n\n")
         self.txt.see("end")
 
@@ -263,6 +269,17 @@ class ModelDownloaderGUI(tk.Tk):
         self.txt.delete(last_index, "end-1c")
         self.txt.insert("end", new_text)
 
+    def _append_line(self, text: str):
+        # Collapse excessive blank lines to shorten gaps
+        if text.strip() == "":
+            if self._blank_count >= 1:
+                return
+            self._blank_count += 1
+        else:
+            self._blank_count = 0
+        self.txt.insert("end", text + "\n")
+        self.txt.see("end")
+
     def log(self, text):
         # Handle \r-updating lines from tqdm/CLI: keep last line updating in place
         if "\r" in text:
@@ -270,14 +287,13 @@ class ModelDownloaderGUI(tk.Tk):
             if "\n" in seg:
                 parts = seg.split("\n")
                 for p in parts[:-1]:
-                    self.txt.insert("end", p + "\n")
+                    self._append_line(p)
                 self._log_replace_last_line(parts[-1])
                 self.txt.insert("end", "\n")
             else:
                 self._log_replace_last_line(seg)
         else:
-            self.txt.insert("end", text + "\n")
-        self.txt.see("end")
+            self._append_line(text)
 
     # --- actions ---
     def start_downloads(self):
@@ -332,12 +348,16 @@ class ModelDownloaderGUI(tk.Tk):
                     args.extend(["--exclude", exc])
 
                 env = os.environ.copy()
-                env["PYTHONUNBUFFERED"] = "1"  # help streaming from Python-based CLIs
+                env["PYTHONUNBUFFERED"] = "1"  # help streaming
                 if item["gated"]:
                     env["HF_TOKEN"] = token
                     env["HUGGINGFACE_HUB_TOKEN"] = token
 
                 self._run_cli_stream(args, env)
+
+                # Clean up extra control folders produced by 'hf download' inside this model dir
+                self._cleanup_local_dir(local_dir)
+
                 self.queue.put(("log", f"✓ Done: {item['ui']}"))
 
             except Exception as e:
@@ -345,44 +365,71 @@ class ModelDownloaderGUI(tk.Tk):
 
         self.queue.put(("done", None))
 
+    def _cleanup_local_dir(self, local_dir: Path):
+        # Remove hf helper dirs if present; keep model files
+        for p in [local_dir / ".cache", local_dir / "refs"]:
+            try:
+                if p.exists():
+                    # recursive remove
+                    for root, dirs, files in os.walk(p, topdown=False):
+                        for f in files:
+                            try: os.remove(Path(root) / f)
+                            except Exception: pass
+                        for d in dirs:
+                            try: os.rmdir(Path(root) / d)
+                            except Exception: pass
+                    try: os.rmdir(p)
+                    except Exception: pass
+            except Exception:
+                pass
+
     def _run_cli_stream(self, args, env):
-        # Stream character-by-character so carriage-return progress bars are visible
+        # Stream lines as they arrive and add a heartbeat during long silences.
         cmd = HF_CMD + args  # uses 'hf download'
         self.queue.put(("log", "Running: " + " ".join(shlex.quote(a) for a in cmd)))
 
-        with subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            bufsize=0,                # unbuffered (binary mode)
-            universal_newlines=False, # read bytes so we can process \r smoothly
+            bufsize=1,                   # line-buffer if possible
+            universal_newlines=True,     # text mode
+            encoding="utf-8",
+            errors="replace",
             env=env
-        ) as proc:
-            buf = bytearray()
-            while True:
-                chunk = proc.stdout.read(1)
-                if not chunk:
-                    break
-                buf += chunk
-                # Flush on CR or LF so progress bars update
-                if chunk in (b"\r", b"\n"):
-                    try:
-                        text = buf.decode("utf-8", errors="replace")
-                    except Exception:
-                        text = buf.decode(errors="replace")
-                    self.queue.put(("raw", text))
-                    buf.clear()
-            # Flush any tail bytes
-            if buf:
-                try:
-                    text = buf.decode("utf-8", errors="replace")
-                except Exception:
-                    text = buf.decode(errors="replace")
-                self.queue.put(("raw", text))
+        )
 
-            ret = proc.wait()
-            if ret != 0:
-                raise RuntimeError(f"hf exited with code {ret}")
+        last_ping = time.time()
+        self._heartbeat_enabled = True
+
+        def reader():
+            nonlocal last_ping
+            for line in iter(proc.stdout.readline, ''):
+                last_ping = time.time()
+                self.queue.put(("raw", line.rstrip("\n")))
+            proc.stdout.close()
+
+        def heartbeat():
+            # If no output for 0.7s, print a dot on the same line to show liveness
+            spinner_line = ""
+            while self._heartbeat_enabled and proc.poll() is None:
+                if time.time() - last_ping > 0.7:
+                    spinner_line += "."
+                    if len(spinner_line) > 40:
+                        spinner_line = "."
+                    self.queue.put(("heartbeat", spinner_line))
+                    last_ping = time.time()
+                time.sleep(0.25)
+
+        t_reader = threading.Thread(target=reader, daemon=True)
+        t_beat = threading.Thread(target=heartbeat, daemon=True)
+        t_reader.start(); t_beat.start()
+        ret = proc.wait()
+        self._heartbeat_enabled = False
+        t_reader.join(timeout=1.0)
+        t_beat.join(timeout=1.0)
+        if ret != 0:
+            raise RuntimeError(f"hf exited with code {ret}")
 
     def _poll_queue(self):
         try:
@@ -391,11 +438,10 @@ class ModelDownloaderGUI(tk.Tk):
                 if kind == "log":
                     self.log(payload)
                 elif kind == "raw":
-                    # payload may contain '\r' updates; don't strip
-                    # ensure each update gets rendered
-                    for seg in payload.splitlines(True):  # keepends=True
-                        # if line ends with CR only, log() will treat it as progress
-                        self.log(seg)
+                    self.log(payload)
+                elif kind == "heartbeat":
+                    # overwrite last line with spinner/dots (no extra blank lines)
+                    self._log_replace_last_line(payload)
                 elif kind == "done":
                     self.downloading = False
                     self.btn_download.config(state="normal")
@@ -419,4 +465,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
