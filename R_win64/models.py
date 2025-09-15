@@ -3,11 +3,11 @@ import sys
 import threading
 import subprocess
 import shlex
-import queue
 import time
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
+import webbrowser
 
 # ---------------- Paths & caches ----------------
 APP_ROOT = Path(__file__).resolve().parent
@@ -21,7 +21,6 @@ os.environ["TRANSFORMERS_CACHE"] = str(MODELS_DIR)
 ICON_PATH = APP_ROOT / "content" / "AppIcon.ico"
 
 # ---------------- Model list ----------------
-# Added 'markers' for robust "installed" checks.
 MODEL_ITEMS = [
     {
         "ui": "Faster-Whisper Large V3 Turbo — Speech-to-Text (fast ASR)",
@@ -30,24 +29,18 @@ MODEL_ITEMS = [
         "gated": False,
         "include": [],
         "exclude": [],
-        "markers": ["model.bin"],  # primary artifact in that repo
+        "markers": ["model.bin"],
         "blurb": "Fast, accurate Whisper variant for transcription."
     },
     {
-        "ui": "wav2vec2 Base 960h — ASR backbone/features (Meta)",
+        "ui": "Wav2Vec2 Base 960h — word-level alignment (English only) (Meta)",
         "repo": "facebook/wav2vec2-base-960h",
         "subdir": "facebook__wav2vec2-base-960h",
         "gated": False,
-        "include": [
-            "pytorch_model.bin", "*.bin",
-            "vocab.json", "tokenizer.json", "tokenizer_config.json",
-            "special_tokens_map.json",
-            "preprocessor_config.json", "feature_extractor_config.json",
-            "*.json", "*.txt"
-        ],
-        "exclude": ["*.safetensors", "*.h5", "*.ckpt"],
-        "markers": ["pytorch_model.bin", "tokenizer_config.json"],
-        "blurb": "LibriSpeech 960h model; uses .bin weights + tokenizer/config files."
+        "include": [],  # no include filters
+        "exclude": ["*.safetensors", "*.h5"],  # only exclude these
+        "markers": ["pytorch_model.bin"],  # simple & reliable
+        "blurb": "Model used for word-level alignment (English)."
     },
     {
         "ui": "WeSpeaker VoxCeleb ResNet34 + LM — Speaker Embeddings",
@@ -76,7 +69,7 @@ MODEL_ITEMS = [
         "gated": True,
         "include": [],
         "exclude": [],
-        "markers": ["config.yaml"],  # pipeline file
+        "markers": ["config.yaml"],
         "blurb": "Who-spoke-when pipeline. Requires access approval and token."
     },
     {
@@ -107,20 +100,16 @@ HELP_STEPS = [
 HF_CMD = ["hf"]  # modern CLI
 
 # --------------- Utility: installed check & cleanup ----------------
-def is_installed(local_dir: Path, markers: list[str]) -> bool:
+def is_installed(local_dir: Path, markers):
     if not local_dir.exists():
         return False
-    # If markers are provided, require at least one present (or all? choose pragmatic "any two"?)
-    # We'll require ALL listed markers if they are specific filenames (no wildcards).
     for m in markers or []:
         if "*" in m or "?" in m:
-            # wildcard marker: any match is fine
             if not list(local_dir.glob(m)):
                 return False
         else:
             if not (local_dir / m).exists():
                 return False
-    # If no markers at all, consider installed if directory has any non-hidden file
     if not markers:
         for p in local_dir.rglob("*"):
             if p.is_file() and p.name not in {".gitignore"}:
@@ -129,7 +118,6 @@ def is_installed(local_dir: Path, markers: list[str]) -> bool:
     return True
 
 def cleanup_model_dir(local_dir: Path):
-    # Remove helper folders produced during download
     for p in [local_dir / ".cache", local_dir / "refs"]:
         if p.exists():
             for root, dirs, files in os.walk(p, topdown=False):
@@ -142,11 +130,12 @@ def cleanup_model_dir(local_dir: Path):
             try: os.rmdir(p)
             except Exception: pass
 
-# --------------- GUI ----------------
+# --------------- GUI components ----------------
 class ModelRow:
-    def __init__(self, parent, item, token_var):
+    def __init__(self, parent, item, token_var, on_retry):
         self.item = item
         self.token_var = token_var
+        self.on_retry = on_retry
         self.var_sel = tk.BooleanVar(value=True)
         self.status = "unknown"
         self.spinner_idx = 0
@@ -155,7 +144,6 @@ class ModelRow:
         self.frame = ttk.Frame(parent)
         self.frame.pack(fill="x", padx=8, pady=6)
 
-        # Left: checkbox + name + blurb
         self.chk = ttk.Checkbutton(self.frame, variable=self.var_sel)
         self.chk.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0,8), pady=(2,0))
 
@@ -165,16 +153,14 @@ class ModelRow:
         self.lbl_blurb = ttk.Label(self.frame, text=item["blurb"], foreground="#555", wraplength=740, justify="left")
         self.lbl_blurb.grid(row=1, column=1, sticky="w", pady=(2,0))
 
-        # Right: status + retry
         self.lbl_status = ttk.Label(self.frame, text="", width=22, anchor="e")
         self.lbl_status.grid(row=0, column=2, sticky="e", padx=(12, 8))
-        self.btn_retry = ttk.Button(self.frame, text="Retry", width=10, command=self.retry)
+        self.btn_retry = ttk.Button(self.frame, text="Retry", width=10, command=lambda: self.on_retry(self))
         self.btn_retry.grid(row=1, column=2, sticky="e", padx=(12, 8))
         self.btn_retry.state(["disabled"])
 
         self.frame.columnconfigure(1, weight=1)
 
-        # compute local dir now
         self.local_dir = MODELS_DIR / item["subdir"]
         self.refresh_status()
 
@@ -222,10 +208,6 @@ class ModelRow:
     def stop_spinner(self):
         self.spinner_running = False
 
-    def retry(self):
-        # Enqueue a single-item download via the parent app
-        self.frame.event_generate("<<RetryRequested>>", when="tail")
-
 class ModelDownloaderGUI(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -236,12 +218,10 @@ class ModelDownloaderGUI(tk.Tk):
         except Exception:
             pass
 
-        # Fixed layout so footer is always visible
         self.geometry("1060x720")
         self.minsize(1060, 720)
         self.configure(padx=10, pady=8)
 
-        self.queue = queue.Queue()
         self.downloading = False
 
         self._build_header()
@@ -252,9 +232,7 @@ class ModelDownloaderGUI(tk.Tk):
         self._build_footer()
 
         self._ui_set_status("Ready.")
-        self.bind("<<RetryRequested>>", self._handle_retry_event)
 
-    # ---- UI sections
     def _build_header(self):
         frm = ttk.Frame(self); frm.pack(fill="x", pady=(4, 8))
         left = ttk.Frame(frm); left.pack(side="left", fill="x", expand=True)
@@ -268,9 +246,14 @@ class ModelDownloaderGUI(tk.Tk):
 
         links = ttk.Frame(box); links.pack(fill="x", padx=6, pady=(0,8))
         for text, url in HELP_STEPS:
+            def opener(u=url):
+                if os.name == "nt":
+                    os.startfile(u)
+                else:
+                    webbrowser.open(u)
             lbl = ttk.Label(links, text=f"• {text}", foreground="#0a53a3", cursor="hand2")
             lbl.pack(anchor="w", padx=8, pady=2)
-            lbl.bind("<Button-1>", lambda e, u=url: os.startfile(u) if os.name == "nt" else webbrowser.open(u))
+            lbl.bind("<Button-1>", lambda e, fn=opener: fn())
 
     def _build_token(self):
         frm = ttk.Frame(self); frm.pack(fill="x", pady=(2, 8))
@@ -279,7 +262,6 @@ class ModelDownloaderGUI(tk.Tk):
         self._token_entry = ttk.Entry(frm, textvariable=self.token_var, width=58, show="•")
         self._token_entry.grid(row=0, column=1, sticky="w", padx=(6, 0))
         self._show_token = tk.BooleanVar(value=False)
-
         def toggle_show():
             self._token_entry.config(show="" if self._show_token.get() else "•")
         ttk.Checkbutton(frm, text="Show", variable=self._show_token, command=toggle_show)\
@@ -288,10 +270,9 @@ class ModelDownloaderGUI(tk.Tk):
     def _build_model_list(self):
         box = ttk.LabelFrame(self, text="Models")
         box.pack(fill="both", pady=6)
-
-        self.rows: list[ModelRow] = []
+        self.rows = []
         for item in MODEL_ITEMS:
-            row = ModelRow(box, item, self.token_var)
+            row = ModelRow(box, item, self.token_var, on_retry=self._download_one_async)
             self.rows.append(row)
 
     def _build_actions(self):
@@ -308,17 +289,8 @@ class ModelDownloaderGUI(tk.Tk):
             foreground="#444"
         ).pack(anchor="w")
 
-    # ---- status helpers
     def _ui_set_status(self, msg):
         self.title(f"Transcribe Offline — Model Downloader   [{msg}]")
-
-    def _handle_retry_event(self, _):
-        # Find which row asked for retry by focus traversal
-        w = self.focus_get()
-        for row in self.rows:
-            if row.btn_retry == w or row.frame == w or row.lbl_status == w:
-                self._download_one(row)
-                break
 
     # ---- main actions
     def start_downloads(self):
@@ -335,30 +307,38 @@ class ModelDownloaderGUI(tk.Tk):
 
     def _download_batch(self, rows):
         for r in rows:
-            ok = self._download_one(r, in_batch=True)
-            # continue through failures; each row shows its own state
-        # batch finished
-        self.queue.put(("batch_done", None))
+            self._download_one(r)
+        self.downloading = False
+        self.btn_download.state(["!disabled"])
+        self._ui_set_status("Done.")
+        for r in self.rows:
+            r.refresh_status()
 
-    def _download_one(self, row: ModelRow, in_batch: bool = False) -> bool:
+    def _download_one_async(self, row):
+        if self.downloading:
+            return
+        self.downloading = True
+        self.btn_download.state(["disabled"])
+        threading.Thread(target=self._download_one_then_unlock, args=(row,), daemon=True).start()
+
+    def _download_one_then_unlock(self, row):
+        self._download_one(row)
+        self.downloading = False
+        self.btn_download.state(["!disabled"])
+        self._ui_set_status("Ready")
+        row.refresh_status()
+
+    def _download_one(self, row):
         item = row.item
         local_dir = row.local_dir
         local_dir.mkdir(parents=True, exist_ok=True)
 
-        # Token checks for gated models
         token = self.token_var.get().strip()
         if item["gated"] and not token:
-            self.queue.put(("popup", ("Token required",
-                                      f"'{item['ui']}' is gated (pyannote). Paste your Hugging Face token first.")))
+            messagebox.showwarning("Token required",
+                                   f"'{item['ui']}' is gated (pyannote). Paste your Hugging Face token first.")
             row.set_status("not_installed")
-            return False
-
-        # Build hf download command
-        args = ["download", item["repo"], "--revision", "main", "--local-dir", str(local_dir)]
-        for inc in item.get("include", []) or []:
-            args.extend(["--include", inc])
-        for exc in item.get("exclude", []) or []:
-            args.extend(["--exclude", exc])
+            return
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -366,109 +346,77 @@ class ModelDownloaderGUI(tk.Tk):
             env["HF_TOKEN"] = token
             env["HUGGINGFACE_HUB_TOKEN"] = token
 
-        # Update UI to downloading with spinner
-        self.queue.put(("downloading_start", row))
+        # Build a single 'hf download' call using the item's include/exclude settings
+        args = ["download", item["repo"], "--revision", "main", "--local-dir", str(local_dir)]
+        for inc in item.get("include", []) or []:
+            args.extend(["--include", inc])
+        for exc in item.get("exclude", []) or []:
+            args.extend(["--exclude", exc])
 
-        # Run process (no log UI; just capture text for error heuristics)
-        try:
-            proc = subprocess.Popen(
-                ["hf"] + args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                universal_newlines=True,
-                encoding="utf-8",
-                errors="replace",
-                env=env
-            )
-        except FileNotFoundError:
-            self.queue.put(("popup", ("Hugging Face CLI not found",
-                                      "The 'hf' CLI was not found on PATH.\n\n"
-                                      "Install/upgrade into this Python:\n  python -m pip install --upgrade huggingface_hub")))
-            self.queue.put(("downloading_end", (row, False)))
-            return False
+        row.set_status("downloading")
+        row.start_spinner(self)
 
-        output_buf = []
-        # Read output without flooding UI (we're not showing it live)
-        for line in iter(proc.stdout.readline, ""):
-            if line:
-                output_buf.append(line)
-        proc.stdout.close()
-        ret = proc.wait()
+        def run_hf(cmd_args):
+            try:
+                proc = subprocess.Popen(
+                    ["hf"] + cmd_args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    universal_newlines=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=env
+                )
+            except FileNotFoundError:
+                messagebox.showerror(
+                    "Hugging Face CLI not found",
+                    "The 'hf' CLI was not found on PATH.\n\n"
+                    "Install/upgrade into this Python:\n  python -m pip install --upgrade huggingface_hub"
+                )
+                return 127, ""
+            out = []
+            for line in iter(proc.stdout.readline, ""):
+                if line:
+                    out.append(line)
+            proc.stdout.close()
+            ret = proc.wait()
+            return ret, "".join(out[-80:])
 
-        # Stop spinner
-        self.queue.put(("downloading_end", (row, ret == 0)))
+        ret, tail = run_hf(args)
 
+        row.stop_spinner()
         if ret == 0:
-            # Cleanup helpers and verify installation
             cleanup_model_dir(local_dir)
-            ok = is_installed(local_dir, item.get("markers", []))
-            if not ok:
-                # Rare: downloaded but markers missing — treat as failure with hint
-                self.queue.put(("popup", ("Verification issue",
-                                          f"'{item['ui']}' downloaded but expected files were not found.\n"
-                                          f"Check folder:\n{local_dir}")))
-                self.queue.put(("set_failed", row))
-                return False
-            self.queue.put(("set_installed", row))
-            return True
-
-        # Non-zero return: show reasoned popups for gated models
-        out = "\n".join(output_buf[-40:])  # tail for context
-        if item["gated"] and any(err in out for err in ["401", "403", "Unauthorized", "permission", "access"]):
-            self.queue.put(("popup", ("Access denied",
-                                      f"Access/token problem while downloading:\n\n{item['ui']}\n\n"
-                                      "• Make sure your token has access to the repo\n"
-                                      "• Ensure you've requested access on the model page\n"
-                                      "• Paste the token in the field above and try again.\n\n"
-                                      f"Repo: {item['repo']}")))
+            if is_installed(local_dir, item.get("markers", [])):
+                row.set_status("installed")
+            else:
+                messagebox.showwarning(
+                    "Verification issue",
+                    f"'{item['ui']}' downloaded but expected files were not found.\n\n"
+                    f"Check folder:\n{local_dir}"
+                )
+                row.set_status("failed")
         else:
-            self.queue.put(("popup", ("Download failed",
-                                      f"'{item['ui']}' failed to download.\n\n"
-                                      f"Command:\n{' '.join(shlex.quote(a) for a in ['hf'] + args)}\n\n"
-                                      f"Last output:\n{out}")))
-        self.queue.put(("set_failed", row))
-        return False
-
-    # ---- queue-driven UI updates
-    def process_queue(self):
-        try:
-            while True:
-                kind, payload = self.queue.get_nowait()
-                if kind == "downloading_start":
-                    row: ModelRow = payload
-                    row.set_status("downloading")
-                    row.start_spinner(self)
-                elif kind == "downloading_end":
-                    row, success = payload
-                    row.stop_spinner()
-                    # status will be finalized by following set_installed/set_failed events
-                elif kind == "set_installed":
-                    payload.set_status("installed")
-                elif kind == "set_failed":
-                    payload.set_status("failed")
-                elif kind == "popup":
-                    title, msg = payload
-                    messagebox.showwarning(title, msg)
-                elif kind == "batch_done":
-                    self.downloading = False
-                    self.btn_download.state(["!disabled"])
-                    self._ui_set_status("Done.")
-                    # Refresh all rows’ installed states in case user downloaded externally too
-                    for r in self.rows:
-                        r.refresh_status()
-                self.queue.task_done()
-        except queue.Empty:
-            pass
-        self.after(100, self.process_queue)
-
-    def mainloop(self, n=0):
-        # start queue pump
-        self.after(100, self.process_queue)
-        super().mainloop()
+            if item["gated"] and any(k in tail for k in ["401", "403", "Unauthorized", "permission", "access"]):
+                messagebox.showwarning(
+                    "Access denied",
+                    f"Access/token problem while downloading:\n\n{item['ui']}\n\n"
+                    "• Make sure your token has access to the repo\n"
+                    "• Ensure you've requested access on the model page\n"
+                    "• Paste the token in the field above and try again.\n\n"
+                    f"Repo: {item['repo']}"
+                )
+            else:
+                messagebox.showwarning(
+                    "Download failed",
+                    f"'{item['ui']}' failed to download.\n\n"
+                    f"Command:\n{' '.join(shlex.quote(a) for a in ['hf'] + args)}\n\n"
+                    f"Last output:\n{tail}"
+                )
+            row.set_status("failed")
 
 
 def main():
-    # Optional: warn in console if hf missing
     try:
         subprocess.run(["hf", "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
     except Exception:
