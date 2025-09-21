@@ -10,8 +10,6 @@ Local-first audio/video transcription with optional **word alignment** and **spe
 - **Who said what:** **pyannote.audio** diarisation assigns speakers by segment or word.  
 - **Subtitles & exports:** Save **TXT / JSON / CSV / SRT / VTT**.  
 - **Local LLM tooling:** Run translation, summarisation, or copy‑editing with **llama.cpp** (CPU only).  
-- **Zero network:** App blocks sockets to guarantee **offline** processing.
-
 ---
 
 ## Primary packages used
