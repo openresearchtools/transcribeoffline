@@ -1,4 +1,5 @@
 # Transcribe Offline (Windows, RStudio)
+<img width="1265" height="934" alt="potatoes" src="https://github.com/user-attachments/assets/e73618c4-ccd1-4fe8-a7cc-e2800aa65ef2" />
 
 Local-first audio/video transcription with optional **word alignment** and **speaker diarisation**, plus built‑in tools for **translation**, **summarisation**, and **grammar correction** using a local LLM. Everything runs **offline on your PC** — no uploads.
 ---
