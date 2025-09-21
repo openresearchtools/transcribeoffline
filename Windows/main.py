@@ -1258,12 +1258,13 @@ from tkinter import ttk, filedialog, messagebox
 def _torch_sync_and_free():
     try:
         import torch
-        if hasattr(torch,"cuda"):
+        if hasattr(torch, "cuda"):
             try: torch.cuda.synchronize()
             except Exception: pass
             try: torch.cuda.empty_cache()
             except Exception: pass
-    except Exception: pass
+    except Exception:
+        pass
 
 def _free_all_memory(_=""):
     gc.collect(); _torch_sync_and_free(); importlib.invalidate_caches()
@@ -1279,13 +1280,15 @@ def _set_torch_threads(threads: int, interop: int):
 
 # ---------- ffmpeg (child) ----------
 def _ffmpeg_decode_f32_mono_16k_child(src_path: str):
-    ff=ffmpeg_path()
-    cmd=[ff,"-v","error","-nostdin","-i",src_path,"-map","0:a:0","-vn","-sn","-dn","-ac","1","-ar","16000","-f","f32le","pipe:1"]
-    proc=subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    out,err=proc.communicate()
-    if proc.returncode!=0: raise RuntimeError(f"ffmpeg decode failed: {err.decode('utf-8','ignore')}")
-    arr=np.frombuffer(out, dtype=np.float32).copy()
-    return arr,16000
+    ff = ffmpeg_path()
+    cmd = [ff, "-v", "error", "-nostdin", "-i", src_path, "-map", "0:a:0", "-vn", "-sn", "-dn",
+           "-ac", "1", "-ar", "16000", "-f", "f32le", "pipe:1"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg decode failed: {err.decode('utf-8','ignore')}")
+    arr = np.frombuffer(out, dtype=np.float32).copy()
+    return arr, 16000
 
 # =================== CHILD STAGES ===================
 def _proc_transcribe_entry(job: dict, out_q):
@@ -1297,44 +1300,70 @@ def _proc_transcribe_entry(job: dict, out_q):
     """
     try:
         from faster_whisper import WhisperModel
-        media_path=job["media_path"]; model_dir=job["whisper_dir"]; lang_code=job["lang_code"]
+        media_path = job["media_path"]; model_dir = job["whisper_dir"]; lang_code = job["lang_code"]
 
         threads, interop = _recommended_threads()
-        # Set BLAS/OMP caps in child for consistency
-        os.environ["OMP_NUM_THREADS"]      = str(threads)
-        os.environ["MKL_NUM_THREADS"]      = str(threads)
+        # mirror BLAS/OMP caps in child
+        os.environ["OMP_NUM_THREADS"] = str(threads)
+        os.environ["MKL_NUM_THREADS"] = str(threads)
         os.environ["OPENBLAS_NUM_THREADS"] = str(threads)
-        os.environ["NUMEXPR_NUM_THREADS"]  = str(threads)
+        os.environ["NUMEXPR_NUM_THREADS"] = str(threads)
 
         out_q.put(("log", f"[Transcribe] loading (threads={threads}, workers=1)"))
 
-        model=WhisperModel(
+        model = WhisperModel(
             str(model_dir),
             device="cpu",
             compute_type="int8",
             cpu_threads=threads,
-            num_workers=1   # IMPORTANT: single job at a time, no worker pool
+            num_workers=1
         )
 
-        out_q.put(("log","[Transcribe] start"))
+        out_q.put(("log", "[Transcribe] start"))
+        # IMPORTANT: word_timestamps=True to prevent downstream word-loss
         segments, info = model.transcribe(
             media_path,
-            language=None if lang_code=="auto" else lang_code,
-            word_timestamps=False,
+            language=None if lang_code == "auto" else lang_code,
+            word_timestamps=True,
             vad_filter=False,
         )
-        seg_list=[]
+
+        seg_list = []
         for s in segments:
-            words=[]
+            words = []
             if s.words:
                 for w in s.words:
-                    words.append({"start": float(w.start or s.start), "end": float(w.end or (w.start or s.start)),
-                                  "word": (w.word or "").strip()})
+                    words.append({
+                        "start": float(w.start if w.start is not None else (s.start or 0.0)),
+                        "end":   float(w.end   if w.end   is not None else (w.start or s.start or 0.0)),
+                        "word": (w.word or "").strip()
+                    })
+
+            text = (s.text or "").strip()
+            # Safety: if model produced empty text but has words, rebuild text from words
+            if not text and words:
+                # simple join preserving punctuation adjacency
+                buff = []
+                for tok in words:
+                    t = tok.get("word","")
+                    if not t: continue
+                    if t in [",",".","!","?",":",";"]:
+                        buff.append(t)
+                    elif not buff:
+                        buff.append(t)
+                    else:
+                        buff.append(" " + t)
+                text = "".join(buff).strip()
+
             seg_list.append({
-                "start": float(s.start or 0.0), "end": float(s.end or (s.start or 0.0)+0.02),
-                "text": (s.text or "").strip(), "words": words
+                "start": float(s.start or 0.0),
+                "end":   float(s.end   if s.end is not None else (s.start or 0.0) + 0.02),
+                "text":  text,
+                "words": words
             })
-        lang = (getattr(info, "language", None) or (lang_code if lang_code!="auto" else "en"))
+
+        # language code to steer alignment gate
+        lang = (getattr(info, "language", None) or (lang_code if lang_code != "auto" else "en"))
         out_q.put(("log", f"[Transcribe] segments={len(seg_list)} • lang={lang}"))
         out_q.put(("segments", {"segments": seg_list, "lang_for_align": (lang.split('-')[0] if lang else 'en')}))
     except Exception:
@@ -1344,108 +1373,163 @@ def _proc_transcribe_entry(job: dict, out_q):
         except Exception: pass
         gc.collect()
 
-
+# ---------- alignment helpers ----------
 def _segments_normalize_for_align(segments):
-    def _gt(d,L,S):
+    def _gt(d, L, S):
         if L in d: return float(d[L])
         if S in d: return float(d[S])
         return None
-    out=[]
+
+    out = []
     for seg in (segments or []):
-        seg=dict(seg)
-        s=_gt(seg,"start","s"); e=_gt(seg,"end","e"); words=list(seg.get("words") or [])
-        raw_st=[_gt(w,"start","s") for w in words]
-        if s is None: s=next((st for st in raw_st if st is not None),0.0)
+        seg = dict(seg)
+        s = _gt(seg, "start", "s"); e = _gt(seg, "end", "e")
+        words = list(seg.get("words") or [])
+
+        # fill missing segment start/end from words
+        raw_st = []
+        for w in words:
+            raw_st.append(_gt(w, "start", "s"))
+
+        if s is None:
+            s = next((st for st in raw_st if st is not None), 0.0)
+
         if e is None:
-            last=None
+            last = None
             for w in words:
-                we=_gt(w,"end","e")
-                if we is not None: last=we
+                we = _gt(w, "end", "e")
+                if we is not None: last = we
             if last is None:
-                last_start=next((st for st in reversed(raw_st) if st is not None), s or 0.0)
-                last=(last_start if last_start is not None else 0.0)+0.02
-            e=last
-        if e<s: e=s
-        seg["start"]=s; seg["end"]=e; seg["s"]=s; seg["e"]=e
-        fixed=[]; n=len(words)
-        for i,w in enumerate(words):
-            w=dict(w)
-            ws=_gt(w,"start","s"); we=_gt(w,"end","e")
-            if ws is None: ws=_gt(fixed[-1],"end","e") if fixed else s
+                last_start = next((st for st in reversed(raw_st) if st is not None), s or 0.0)
+                last = (last_start if last_start is not None else 0.0) + 0.02
+            e = last
+
+        if e < s: e = s
+
+        seg["start"] = s; seg["end"] = e; seg["s"] = s; seg["e"] = e
+
+        # words
+        fixed = []
+        n = len(words)
+        for i, w in enumerate(words):
+            w = dict(w)
+            ws = _gt(w, "start", "s"); we = _gt(w, "end", "e")
+            if ws is None:
+                ws = _gt(fixed[-1], "end", "e") if fixed else s
             if we is None:
-                nxt=None
-                for j in range(i+1,n):
-                    if raw_st[j] is not None: nxt=raw_st[j]; break
+                nxt = None
+                # prefer next raw start
+                for j in range(i+1, n):
+                    if raw_st[j] is not None: nxt = raw_st[j]; break
                 if nxt is None:
-                    for j in range(i+1,n):
-                        nxt=_gt(words[j],"start","s")
+                    for j in range(i+1, n):
+                        nxt = _gt(words[j], "start", "s")
                         if nxt is not None: break
-                we=nxt if nxt is not None else e
-            if we<ws: we=ws
-            w["start"]=ws; w["end"]=we; w["s"]=ws; w["e"]=we
-            if "word" not in w and "text" in w: w["word"]=w["text"]
+                we = nxt if nxt is not None else e
+            if we < ws: we = ws
+            w["start"] = ws; w["end"] = we; w["s"] = ws; w["e"] = we
+            if "word" not in w and "text" in w: w["word"] = w["text"]
             fixed.append(w)
-        seg["words"]=fixed; out.append(seg)
+
+        seg["words"] = fixed
+        # safety: rebuild text if empty
+        if not (seg.get("text") or "").strip() and fixed:
+            buff = []
+            for tok in fixed:
+                t = (tok.get("word") or tok.get("text") or "").strip()
+                if not t: continue
+                if t in [",",".","!","?",":",";"]:
+                    buff.append(t)
+                elif not buff:
+                    buff.append(t)
+                else:
+                    buff.append(" " + t)
+            seg["text"] = "".join(buff).strip()
+
+        out.append(seg)
     return out
 
 def _segments_sanitize_word_ts(segments):
-    out=[]
+    out = []
     for seg in (segments or []):
-        seg=dict(seg); words=seg.get("words") or []
-        fixed=[]; last=float(seg.get("start",0.0)) if seg.get("start") is not None else 0.0
+        seg = dict(seg); words = seg.get("words") or []
+        fixed = []; last = float(seg.get("start", 0.0)) if seg.get("start") is not None else 0.0
         for w in words:
             if not isinstance(w, dict): continue
-            ws=w.get("start", w.get("s")); we=w.get("end", w.get("e"))
-            if ws is None and "ts" in w: ws=w["ts"]
-            if we is None and "te" in w: we=w["te"]
-            try: ws=float(ws) if ws is not None else None; we=float(we) if we is not None else None
-            except Exception: ws=None; we=None
+            ws = w.get("start", w.get("s")); we = w.get("end", w.get("e"))
+            if ws is None and "ts" in w: ws = w["ts"]
+            if we is None and "te" in w: we = w["te"]
+            try:
+                ws = float(ws) if ws is not None else None
+                we = float(we) if we is not None else None
+            except Exception:
+                ws = None; we = None
             if ws is None and we is None: continue
-            if ws is None: ws=last
-            if we is None: we=ws
-            if we<ws: we=ws
-            last=we
-            w2=dict(w); w2["start"]=ws; w2["end"]=we; w2["s"]=ws; w2["e"]=we
-            if "word" not in w2 and "text" in w2: w2["word"]=w2["text"]
+            if ws is None: ws = last
+            if we is None: we = ws
+            if we < ws: we = ws
+            last = we
+            w2 = dict(w); w2["start"] = ws; w2["end"] = we; w2["s"] = ws; w2["e"] = we
+            if "word" not in w2 and "text" in w2: w2["word"] = w2["text"]
             fixed.append(w2)
-        sst=seg.get("start", seg.get("s")); eet=seg.get("end", seg.get("e"))
-        try: sst=float(sst) if sst is not None else (fixed[0]["start"] if fixed else 0.0)
-        except Exception: sst=0.0
-        try: eet=float(eet) if eet is not None else (fixed[-1]["end"] if fixed else sst)
-        except Exception: eet=sst
-        if eet<sst: eet=sst
-        seg["start"]=sst; seg["end"]=eet; seg["s"]=sst; seg["e"]=eet; seg["words"]=fixed
+
+        sst = seg.get("start", seg.get("s"))
+        eet = seg.get("end", seg.get("e"))
+        try: sst = float(sst) if sst is not None else (fixed[0]["start"] if fixed else 0.0)
+        except Exception: sst = 0.0
+        try: eet = float(eet) if eet is not None else (fixed[-1]["end"] if fixed else sst)
+        except Exception: eet = sst
+        if eet < sst: eet = sst
+
+        seg["start"] = sst; seg["end"] = eet; seg["s"] = sst; seg["e"] = eet; seg["words"] = fixed
+
+        # safety: rebuild text if empty
+        if not (seg.get("text") or "").strip() and fixed:
+            buff = []
+            for tok in fixed:
+                t = (tok.get("word") or tok.get("text") or "").strip()
+                if not t: continue
+                if t in [",",".","!","?",":",";"]:
+                    buff.append(t)
+                elif not buff:
+                    buff.append(t)
+                else:
+                    buff.append(" " + t)
+            seg["text"] = "".join(buff).strip()
+
         out.append(seg)
     return out
 
 def _proc_align_entry(job: dict, out_q):
     """
     WhisperX alignment on CPU, single process.
-    No 'workers' parameter is used here; thread parallelism is via Torch.
     """
     try:
         t, io = _recommended_threads()
         _set_torch_threads(t, io)
-        # mirror BLAS/OMP caps
-        os.environ["OMP_NUM_THREADS"]      = str(t)
-        os.environ["MKL_NUM_THREADS"]      = str(t)
+        os.environ["OMP_NUM_THREADS"] = str(t)
+        os.environ["MKL_NUM_THREADS"] = str(t)
         os.environ["OPENBLAS_NUM_THREADS"] = str(t)
-        os.environ["NUMEXPR_NUM_THREADS"]  = str(t)
+        os.environ["NUMEXPR_NUM_THREADS"] = str(t)
 
         import whisperx, time as _t
-        media_path=job["media_path"]; segments=job["segments"]; align_dir=job["align_dir"]
-        t0=_t.perf_counter()
+        media_path = job["media_path"]; segments = job["segments"]; align_dir = job["align_dir"]
+        t0 = _t.perf_counter()
         out_q.put(("log", f"[Align] threads={t}, interop={io}"))
-        out_q.put(("log","[Align] decode"))
-        wav_f32,sr=_ffmpeg_decode_f32_mono_16k_child(media_path)
-        out_q.put(("log","[Align] load"))
+        out_q.put(("log", "[Align] decode"))
+        wav_f32, sr = _ffmpeg_decode_f32_mono_16k_child(media_path)
+        out_q.put(("log", "[Align] load"))
         model_a, metadata = whisperx.load_align_model(language_code="en", device="cpu", model_name=str(align_dir))
-        out_q.put(("log","[Align] run"))
-        aligned=whisperx.align(segments, model_a, metadata, wav_f32, device="cpu")
-        raw=aligned["segments"]
-        total_words=sum(len(s.get("words") or []) for s in raw)
-        seg2=_segments_sanitize_word_ts(_segments_normalize_for_align(raw))
-        words_ts_after=sum(1 for s in seg2 for w in (s.get("words") or []) if isinstance(w,dict) and (w.get("start") is not None and w.get("end") is not None))
+        out_q.put(("log", "[Align] run"))
+        aligned = whisperx.align(segments, model_a, metadata, wav_f32, device="cpu")
+
+        raw = aligned.get("segments") or []
+        total_words = sum(len(s.get("words") or []) for s in raw)
+        seg2 = _segments_sanitize_word_ts(_segments_normalize_for_align(raw))
+        words_ts_after = sum(
+            1 for s in seg2 for w in (s.get("words") or [])
+            if isinstance(w, dict) and (w.get("start") is not None and w.get("end") is not None)
+        )
         out_q.put(("log", f"[Align] aligned words: {words_ts_after}/{total_words} • {(_t.perf_counter()-t0):.2f}s"))
         out_q.put(("segments", seg2))
     except Exception:
@@ -1455,54 +1539,60 @@ def _proc_align_entry(job: dict, out_q):
         except Exception: pass
         gc.collect()
 
+# ---------- diarization ----------
 def _segment_level_assign_by_overlap(annotation, segments):
-    diar_rows=[]
+    diar_rows = []
     for (segment, _, speaker) in annotation.itertracks(yield_label=True):
         diar_rows.append({"start": float(segment.start), "end": float(segment.end), "speaker": str(speaker)})
+
     for s in (segments or []):
         try:
-            ss=float(s.get("start", s.get("s", 0.0)) or 0.0)
-            se=float(s.get("end", s.get("e", ss)) or ss)
+            ss = float(s.get("start", s.get("s", 0.0)) or 0.0)
+            se = float(s.get("end",   s.get("e", ss))    or ss)
         except Exception:
-            ss,se=0.0,0.0
-        if se<ss: se=ss
-        best_spk=None; best_inter=0.0
+            ss, se = 0.0, 0.0
+        if se < ss: se = ss
+
+        best_spk = None; best_inter = 0.0
         for d in diar_rows:
-            inter=max(0.0, min(d["end"], se)-max(d["start"], ss))
-            if inter>best_inter: best_inter=inter; best_spk=d["speaker"]
-        if best_spk is None: best_spk=s.get("speaker") or "SPEAKER_00"
-        s["speaker"]=best_spk
+            inter = max(0.0, min(d["end"], se) - max(d["start"], ss))
+            if inter > best_inter:
+                best_inter = inter; best_spk = d["speaker"]
+
+        if best_spk is None:
+            best_spk = s.get("speaker") or "SPEAKER_00"
+
+        s["speaker"] = best_spk
         for w in (s.get("words") or []):
-            if not w.get("speaker"): w["speaker"]=best_spk
+            if not w.get("speaker"): w["speaker"] = best_spk
     return segments
 
 def _proc_diar_entry(job: dict, out_q):
     """
     Pyannote diarization on CPU, single process.
-    No worker pools; thread parallelism is via Torch only.
-
-    NOTE (mac-exact): uses RAW pyannote turns + whisperx.assign_word_speakers.
-    No pre/post smoothing, no glue/island collapse, no word-run smoothing.
     """
     try:
         t, io = _recommended_threads()
         _set_torch_threads(t, io)
-        os.environ["OMP_NUM_THREADS"]      = str(t)
-        os.environ["MKL_NUM_THREADS"]      = str(t)
+        os.environ["OMP_NUM_THREADS"] = str(t)
+        os.environ["MKL_NUM_THREADS"] = str(t)
         os.environ["OPENBLAS_NUM_THREADS"] = str(t)
-        os.environ["NUMEXPR_NUM_THREADS"]  = str(t)
+        os.environ["NUMEXPR_NUM_THREADS"] = str(t)
 
         import torch
         from pyannote.audio import Pipeline
         import whisperx as _wx
         import pandas as pd
-        media_path=job["media_path"]; segments=job["segments"]
-        pya_seg_dir=job["pya_seg_dir"]; pya_emb_dir=job["pya_emb_dir"]
-        num_speakers=job["num_speakers"]; alignment_on=bool(job.get("alignment_on", False))
-        out_q.put(("log", f"[Diarise] threads={t}, interop={io}"))
-        out_q.put(("log","[Diarise] decode"))
-        wav_f32,sr=_ffmpeg_decode_f32_mono_16k_child(media_path)
 
+        media_path = job["media_path"]; segments = job["segments"]
+        pya_seg_dir = job["pya_seg_dir"]; pya_emb_dir = job["pya_emb_dir"]
+        num_speakers = job["num_speakers"]; alignment_on = bool(job.get("alignment_on", False))
+
+        out_q.put(("log", f"[Diarise] threads={t}, interop={io}"))
+        out_q.put(("log", "[Diarise] decode"))
+        wav_f32, sr = _ffmpeg_decode_f32_mono_16k_child(media_path)
+
+        # local pipeline config with provided local model bins
         tmp_yaml = Path(tempfile.mkdtemp(prefix="pya_")) / "diar_local.yaml"
         tmp_yaml.write_text(f"""version: 3.1.0
 pipeline:
@@ -1516,67 +1606,94 @@ pipeline:
     segmentation_batch_size: 32
 """, "utf-8")
 
-        out_q.put(("log","[Diarise] load"))
+        out_q.put(("log", "[Diarise] load"))
         pipe = Pipeline.from_pretrained(str(tmp_yaml))
-        try: pipe.instantiate({"clustering": {"method":"centroid","min_cluster_size":12,"threshold":0.7046},"segmentation":{"min_duration_off":0.0}})
-        except Exception: pass
-        waveform=torch.from_numpy(np.ascontiguousarray(wav_f32)).unsqueeze(0)
-        diar_kwargs={}
-        ns=(str(num_speakers) or "auto").strip().lower()
-        if ns not in ("","auto"):
-            try: diar_kwargs["num_speakers"]=int(ns)
+        try:
+            pipe.instantiate({
+                "clustering": {"method": "centroid", "min_cluster_size": 12, "threshold": 0.7046},
+                "segmentation": {"min_duration_off": 0.0}
+            })
+        except Exception:
+            pass
+
+        waveform = torch.from_numpy(np.ascontiguousarray(wav_f32)).unsqueeze(0)
+        diar_kwargs = {}
+        ns = (str(num_speakers) or "auto").strip().lower()
+        if ns not in ("", "auto"):
+            try: diar_kwargs["num_speakers"] = int(ns)
             except Exception: pass
-        out_q.put(("log","[Diarise] run"))
+
+        out_q.put(("log", "[Diarise] run"))
         with torch.no_grad():
             diarization = pipe({"waveform": waveform, "sample_rate": 16000}, **diar_kwargs)
 
-        out_q.put(("log","[Diarise] assign"))
+        out_q.put(("log", "[Diarise] assign"))
 
-        did_word=False
+        # Determine if we have word-level timestamps
         has_word_ts = any((s.get("words") or []) for s in (segments or [])) and any(
-            any(isinstance(w,dict) and w.get("start") is not None and w.get("end") is not None for w in (s.get("words") or []))
-            for s in (segments or []))
+            any(isinstance(w, dict) and w.get("start") is not None and w.get("end") is not None for w in (s.get("words") or []))
+            for s in (segments or [])
+        )
 
+        did_word = False
         if alignment_on and has_word_ts:
-            # RAW diar rows (no smoothing, mac-exact)
-            raw_rows=[]
-            for (segment,_,speaker) in diarization.itertracks(yield_label=True):
+            # Raw diarization rows (no smoothing) then whisperx word-speaker assignment
+            raw_rows = []
+            for (segment, _, speaker) in diarization.itertracks(yield_label=True):
                 raw_rows.append({"start": float(segment.start), "end": float(segment.end), "speaker": str(speaker)})
             raw_rows = sorted(raw_rows, key=lambda r: (r["start"], r["end"]))
             diar_df = pd.DataFrame(raw_rows)
 
             def _miniseg(segs):
-                out=[]
+                outm = []
                 for s in (segs or []):
-                    try: ss=float(s.get("start", s.get("s",0.0)) or 0.0)
-                    except Exception: ss=0.0
-                    try: ee=float(s.get("end", s.get("e", ss)) or ss)
-                    except Exception: ee=ss
-                    if ee<ss: ee=ss
-                    ms={"start": ss, "end": ee, "text": (s.get("text") or ""), "words":[]}
+                    try: ss = float(s.get("start", s.get("s", 0.0)) or 0.0)
+                    except Exception: ss = 0.0
+                    try: ee = float(s.get("end",   s.get("e", ss))    or ss)
+                    except Exception: ee = ss
+                    if ee < ss: ee = ss
+                    ms = {"start": ss, "end": ee, "text": (s.get("text") or ""), "words": []}
                     for w in (s.get("words") or []):
-                        if not isinstance(w,dict): continue
-                        ws=w.get("start", w.get("s")); we=w.get("end", w.get("e"))
-                        try: ws=float(ws) if ws is not None else None; we=float(we) if we is not None else None
-                        except Exception: ws=None; we=None
+                        if not isinstance(w, dict): continue
+                        ws = w.get("start", w.get("s")); we = w.get("end", w.get("e"))
+                        try:
+                            ws = float(ws) if ws is not None else None
+                            we = float(we) if we is not None else None
+                        except Exception:
+                            ws = None; we = None
                         if ws is None or we is None: continue
-                        if we<ws: we=ws
-                        token=(w.get("word") or w.get("text") or "").strip()
-                        ms["words"].append({"start": ws, "end": we, "word": token})
-                    out.append(ms)
-                return out
+                        if we < ws: we = ws
+                        ms["words"].append({"start": ws, "end": we, "word": (w.get("word") or w.get("text") or "").strip()})
+                    outm.append(ms)
+                return outm
 
             try:
-                final=_wx.assign_word_speakers(diar_df, {"segments": _miniseg(segments)})
-                segments=final["segments"]
+                final = _wx.assign_word_speakers(diar_df, {"segments": _miniseg(segments)})
+                segments = final["segments"]
                 out_q.put(("log", "[Diarise] word-level (raw)"))
-                did_word=True
+                did_word = True
             except Exception as e:
                 out_q.put(("log", f"[Diarise] word-level failed: {e}"))
 
         if not did_word:
-            segments=_segment_level_assign_by_overlap(diarization, segments)
-            out_q.put(("log","[Diarise] segment-level"))
+            segments = _segment_level_assign_by_overlap(diarization, segments)
+            out_q.put(("log", "[Diarise] segment-level"))
+
+        # final safety: ensure each segment has text
+        for s in (segments or []):
+            if not (s.get("text") or "").strip():
+                buff = []
+                for w in (s.get("words") or []):
+                    t = (w.get("word") or w.get("text") or "").strip()
+                    if not t: continue
+                    if t in [",",".","!","?",":",";"]:
+                        buff.append(t)
+                    elif not buff:
+                        buff.append(t)
+                    else:
+                        buff.append(" " + t)
+                s["text"] = "".join(buff).strip()
+
         out_q.put(("segments", segments))
     except Exception:
         out_q.put(("error", traceback.format_exc()))
@@ -1590,26 +1707,29 @@ def _stage_run(target_fn, job: dict):
     Parent remains responsive; no parallel jobs are spawned.
     """
     q = mp.Queue(); proc = mp.Process(target=target_fn, args=(job, q), daemon=True)
-    t0=time.perf_counter(); proc.start()
-    result=None; errtxt=None
+    t0 = time.perf_counter(); proc.start()
+    result = None; errtxt = None
     while proc.is_alive():
         try:
             kind, payload = q.get(timeout=0.1)
             yield (kind, payload)
-            if kind=="segments": result=payload
-            elif kind=="error": errtxt=payload
-        except queue.Empty: pass
+            if kind == "segments": result = payload
+            elif kind == "error": errtxt = payload
+        except queue.Empty:
+            pass
     while True:
         try:
             kind, payload = q.get_nowait()
             yield (kind, payload)
-            if kind=="segments": result=payload
-            elif kind=="error": errtxt=payload
-        except queue.Empty: break
+            if kind == "segments": result = payload
+            elif kind == "error": errtxt = payload
+        except queue.Empty:
+            break
     proc.join(timeout=2.0)
     try:
         if proc.is_alive(): proc.kill()
-    except Exception: pass
+    except Exception:
+        pass
     yield ("_result", (result, errtxt))
     yield ("log", f"[Stage] done in {time.perf_counter()-t0:.2f}s")
 
@@ -1618,166 +1738,187 @@ def _stage_run(target_fn, job: dict):
 def _dest_base(self, audio_path): from os.path import splitext; return splitext(audio_path)[0]
 
 def _speaker_id_map(self, speakers_in_order):
-    mapping={}; next_id=1
+    mapping = {}; next_id = 1
     for spk in speakers_in_order:
-        if spk not in mapping: mapping[spk]=next_id; next_id+=1
+        if spk not in mapping:
+            mapping[spk] = next_id; next_id += 1
     return mapping
 
 def _format_ts_seconds(self, t):
-    try: ts=float(t); m=int(ts//60); s=int(ts%60); return f"{m:02d}:{s:02d}"
-    except Exception: return "00:00"
+    try:
+        ts = float(t); m = int(ts // 60); s = int(ts % 60); return f"{m:02d}:{s:02d}"
+    except Exception:
+        return "00:00"
 
 def _merge_by_speaker_word_level(self, segments):
-    utterances=[]; curr=None; speakers_seen=[]
+    utterances = []; curr = None; speakers_seen = []
     for seg in (segments or []):
         seg_spk = seg.get("speaker") or "SPEAKER_00"
         words = seg.get("words") or []
-        seg_txt=(seg.get("text") or "").strip()
-        seg_start=seg.get("start", seg.get("s")); seg_end=seg.get("end", seg.get("e"))
+        seg_txt = (seg.get("text") or "").strip()
+        seg_start = seg.get("start", seg.get("s")); seg_end = seg.get("end", seg.get("e"))
+
         if words:
             for w in words:
-                spk=w.get("speaker") or seg_spk
-                ws=w.get("start", w.get("s", seg_start)); we=w.get("end", w.get("e", ws))
-                token=(w.get("word") or w.get("text") or "").strip()
+                spk = w.get("speaker") or seg_spk
+                ws = w.get("start", w.get("s", seg_start))
+                we = w.get("end",   w.get("e", ws))
+                token = (w.get("word") or w.get("text") or "").strip()
                 if token == "": continue
                 if curr is None or spk != curr["speaker"]:
                     if curr is not None: utterances.append(curr)
-                    curr={"speaker": spk, "start": ws, "end": we, "tokens": [token]}
+                    curr = {"speaker": spk, "start": ws, "end": we, "tokens": [token]}
                     speakers_seen.append(spk)
                 else:
-                    if we is not None: curr["end"]=we
-                    if token and token not in [",",".","!","?",":",";"] and not token.startswith("-"):
-                        curr["tokens"].append(" " + token)
-                    else:
+                    if we is not None: curr["end"] = we
+                    # punctuation attached; words get a leading space
+                    if token in [",",".","!","?",":",";"]:
                         curr["tokens"].append(token)
+                    else:
+                        curr["tokens"].append(" " + token)
         else:
             if seg_txt == "": continue
             spk = seg_spk
             if curr is None or spk != curr["speaker"]:
                 if curr is not None: utterances.append(curr)
-                curr={"speaker": spk, "start": seg_start, "end": seg_end, "tokens": [seg_txt]}
+                curr = {"speaker": spk, "start": seg_start, "end": seg_end, "tokens": [seg_txt]}
                 speakers_seen.append(spk)
             else:
-                if seg_end is not None: curr["end"]=seg_end
+                if seg_end is not None: curr["end"] = seg_end
                 curr["tokens"].append(" " + seg_txt)
+
     if curr is not None: utterances.append(curr)
-    spk_map=self._speaker_id_map(speakers_in_order=speakers_seen)
-    out=[]
+
+    spk_map = self._speaker_id_map(speakers_in_order=speakers_seen)
+    out = []
     for u in utterances:
-        sid=spk_map.get(u["speaker"],0); label=f"Speaker{sid:02d}"
-        start=self._format_ts_seconds(u.get("start",0.0))
-        end=self._format_ts_seconds(u.get("end",u.get("start",0.0)))
-        text="".join(u["tokens"]).strip()
+        sid = spk_map.get(u["speaker"], 0); label = f"Speaker{sid:02d}"
+        start = self._format_ts_seconds(u.get("start", 0.0))
+        end   = self._format_ts_seconds(u.get("end",   u.get("start", 0.0)))
+        text  = "".join(u["tokens"]).strip()
         out.append(f"[{start}–{end}] {label}: {text}")
     return out
 
 def _merge_by_speaker_segment_level(self, segments):
-    utterances=[]; curr=None; speakers_seen=[]
+    utterances = []; curr = None; speakers_seen = []
     for seg in (segments or []):
-        spk=seg.get("speaker") or "SPEAKER_00"
-        st=seg.get("start", seg.get("s")); en=seg.get("end", seg.get("e"))
-        txt=(seg.get("text") or "").strip()
-        if txt=="": continue
+        spk = seg.get("speaker") or "SPEAKER_00"
+        st  = seg.get("start", seg.get("s")); en = seg.get("end", seg.get("e"))
+        txt = (seg.get("text") or "").strip()
+        if txt == "": continue
         if curr is None or spk != curr["speaker"]:
             if curr is not None: utterances.append(curr)
-            curr={"speaker": spk, "start": st, "end": en, "text": [txt]}
+            curr = {"speaker": spk, "start": st, "end": en, "text": [txt]}
             speakers_seen.append(spk)
         else:
-            if en is not None: curr["end"]=en
+            if en is not None: curr["end"] = en
             curr["text"].append(" " + txt)
     if curr is not None: utterances.append(curr)
-    spk_map=self._speaker_id_map(speakers_in_order=speakers_seen)
-    out=[]
+
+    spk_map = self._speaker_id_map(speakers_in_order=speakers_seen)
+    out = []
     for u in utterances:
-        sid=spk_map.get(u["speaker"],0); label=f"Speaker{sid:02d}"
-        start=self._format_ts_seconds(u.get("start",0.0))
-        end=self._format_ts_seconds(u.get("end",u.get("start",0.0)))
-        text="".join(u["text"]).strip()
+        sid = spk_map.get(u["speaker"], 0); label = f"Speaker{sid:02d}"
+        start = self._format_ts_seconds(u.get("start", 0.0))
+        end   = self._format_ts_seconds(u.get("end",   u.get("start", 0.0)))
+        text  = "".join(u["text"]).strip()
         out.append(f"[{start}–{end}] {label}: {text}")
     return out
 
-def _fmt_srt(self,t):
-    h=int(t//3600); t-=h*3600; m=int(t//60); t-=m*60; s=int(t); ms=int(round((t-s)*1000))
+def _fmt_srt(self, t):
+    h = int(t // 3600); t -= h*3600
+    m = int(t // 60);   t -= m*60
+    s = int(t)
+    ms = int(round((t - s) * 1000))
     return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
 def _save_srt(self, path, segs):
-    with open(path,"w",encoding="utf-8") as f:
-        for i,s in enumerate(segs,1):
-            st=float(s.get("start",0.0)); en=float(s.get("end",st+0.5)); txt=(s.get("text") or "").strip()
+    with open(path, "w", encoding="utf-8") as f:
+        for i, s in enumerate(segs, 1):
+            st = float(s.get("start", 0.0))
+            en = float(s.get("end",   st + 0.5))
+            txt = (s.get("text") or "").strip()
             try:
-                md=float(self.maxdur_var.get() or "0")
-                if md>0 and en-st>md: en=st+md
-            except Exception: pass
+                md = float(self.maxdur_var.get() or "0")
+                if md > 0 and en - st > md: en = st + md
+            except Exception:
+                pass
             f.write(f"{i}\n{self._fmt_srt(st)} --> {self._fmt_srt(en)}\n{txt}\n\n")
 
 def _save_vtt(self, path, segs):
-    with open(path,"w",encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write("WEBVTT\n\n")
         for s in segs:
-            st=float(s.get("start",0.0)); en=float(s.get("end",st+0.5)); txt=(s.get("text") or "").strip()
+            st = float(s.get("start", 0.0))
+            en = float(s.get("end",   st + 0.5))
+            txt = (s.get("text") or "").strip()
             try:
-                md=float(self.maxdur_var.get() or "0")
-                if md>0 and en-st>md: en=st+md
-            except Exception: pass
-            f.write(f"{self._fmt_srt(st).replace(',','.') } --> {self._fmt_srt(en).replace(',','.') }\n{txt}\n\n")
+                md = float(self.maxdur_var.get() or "0")
+                if md > 0 and en - st > md: en = st + md
+            except Exception:
+                pass
+            f.write(f"{self._fmt_srt(st).replace(',','.')} --> {self._fmt_srt(en).replace(',','.')}\n{txt}\n\n")
 
 # =================== Pipeline orchestrator ===================
 
 def _run_pipeline_subproc(self, media_path: str, local_whisper_dir: str) -> list:
     # 1) Transcribe
     self._post("log", "[Transcribe] start")
-    job1={"media_path": media_path, "whisper_dir": local_whisper_dir, "lang_code": LANG_MAP.get(self.lang_var.get(),"en")}
-    res1=None; err1=None
+    job1 = {"media_path": media_path, "whisper_dir": local_whisper_dir, "lang_code": LANG_MAP.get(self.lang_var.get(), "en")}
+    res1 = None; err1 = None
     for kind, payload in _stage_run(_proc_transcribe_entry, job1):
         if kind in ("log","status","preview","preview_from_file","add_output"): self._post(kind, payload)
-        elif kind=="_result": res1, err1 = payload
+        elif kind == "_result": res1, err1 = payload
     if not res1:
         if err1 and "No module named 'faster_whisper'" in err1:
-            self._post("log","[Transcribe] missing faster-whisper (pip install faster-whisper)")
-        self._post("log","[Transcribe] failed; aborting.")
+            self._post("log", "[Transcribe] missing faster-whisper (pip install faster-whisper)")
+        self._post("log", "[Transcribe] failed; aborting.")
         _free_all_memory("after transcribe")
         return []
-    segments=res1["segments"]; lang_for_align=(res1.get("lang_for_align") or job1["lang_code"] or "en").lower()
+    segments = res1["segments"]; lang_for_align = (res1.get("lang_for_align") or job1["lang_code"] or "en").lower()
     _free_all_memory("after transcribe")
 
     # 2) Align (English only)
-    alignment_on=False
+    alignment_on = False
     if self.align_var.get() and lang_for_align == "en":
-        align_dir=_model_dir(ALIGN_EN_LABEL)
+        align_dir = _model_dir(ALIGN_EN_LABEL)
         if align_dir:
             self._post("log", "[Align] start")
-            job2={"media_path": media_path, "segments": segments, "align_dir": str(align_dir)}
-            res2=None; err2=None
+            job2 = {"media_path": media_path, "segments": segments, "align_dir": str(align_dir)}
+            res2 = None; err2 = None
             for kind, payload in _stage_run(_proc_align_entry, job2):
                 if kind in ("log","status"): self._post(kind, payload)
-                elif kind=="_result": res2, err2 = payload
-            if res2: segments=res2; alignment_on=True
+                elif kind == "_result": res2, err2 = payload
+            if res2:
+                segments = res2; alignment_on = True
             else:
                 if err2 and "No module named 'whisperx'" in err2:
-                    self._post("log","[Align] missing whisperx (pip install whisperx==3.1)")
-                self._post("log","[Align] failed/skipped; using unaligned.")
+                    self._post("log", "[Align] missing whisperx (pip install whisperx==3.1)")
+                self._post("log", "[Align] failed/skipped; using unaligned.")
         else:
-            self._post("log", f"[Align] skipped (model not found)")
+            self._post("log", "[Align] skipped (model not found)")
     elif self.align_var.get() and lang_for_align != "en":
         self._post("log", f"[Align] skipped (lang={lang_for_align})")
     _free_all_memory("after align")
 
     # 3) Diarise
     if self.diar_var.get():
-        seg_dir=_model_dir(PYA_SEG_LABEL); emb_dir=_model_dir(PYA_EMB_LABEL)
+        seg_dir = _model_dir(PYA_SEG_LABEL); emb_dir = _model_dir(PYA_EMB_LABEL)
         if seg_dir and emb_dir:
-            self._post("log","[Diarise] start")
-            job3={"media_path": media_path, "segments": segments, "pya_seg_dir": str(seg_dir),
-                  "pya_emb_dir": str(emb_dir), "num_speakers": self.num_speakers_str.get(), "alignment_on": alignment_on}
-            res3=None; err3=None
+            self._post("log", "[Diarise] start")
+            job3 = {"media_path": media_path, "segments": segments,
+                    "pya_seg_dir": str(seg_dir), "pya_emb_dir": str(emb_dir),
+                    "num_speakers": self.num_speakers_str.get(), "alignment_on": alignment_on}
+            res3 = None; err3 = None
             for kind, payload in _stage_run(_proc_diar_entry, job3):
                 if kind in ("log","status"): self._post(kind, payload)
-                elif kind=="_result": res3, err3 = payload
-            if res3: segments=res3
+                elif kind == "_result": res3, err3 = payload
+            if res3:
+                segments = res3
             else:
-                self._post("log","[Diarise] failed/skipped; continuing.")
+                self._post("log", "[Diarise] failed/skipped; continuing.")
         else:
-            self._post("log","[Diarise] skipped (models not found)")
+            self._post("log", "[Diarise] skipped (models not found)")
     _free_all_memory("after diarise")
 
     return segments
@@ -1788,68 +1929,73 @@ def _worker_batch(self, paths, local_whisper_dir):
         for idx, p in enumerate(paths, 1):
             self._post("status", f"{idx}/{len(paths)} {os.path.basename(p)}")
 
-            segments=self._run_pipeline_subproc(p, local_whisper_dir)
-            base=self._dest_base(p)
+            segments = self._run_pipeline_subproc(p, local_whisper_dir)
+            base = self._dest_base(p)
 
-            if self.mode_var.get()=="subs":
-                data_for_export=segments
-                preview_set=False
+            if self.mode_var.get() == "subs":
+                data_for_export = segments
+                preview_set = False
                 if self.save_srt_var.get():
-                    path=base+".srt"
+                    path = base + ".srt"
                     try: self._save_srt(path, segments)
                     except Exception: pass
                     self._post("log", f"Saved: {path}"); self._post("add_output", path)
-                    self._post("preview_from_file", path); preview_set=True
+                    self._post("preview_from_file", path); preview_set = True
                 if self.save_vtt_var.get():
-                    path=base+".vtt"
+                    path = base + ".vtt"
                     try: self._save_vtt(path, segments)
                     except Exception: pass
                     self._post("log", f"Saved: {path}"); self._post("add_output", path)
                     if not preview_set: self._post("preview_from_file", path)
             else:
-                data_for_export=segments
+                data_for_export = segments
                 path = base + ".txt"
                 try:
                     if any((seg.get("words") or []) for seg in segments):
                         lines = self._merge_by_speaker_word_level(segments)
                     else:
                         lines = self._merge_by_speaker_segment_level(segments)
-                    with open(path, "w", encoding="utf-8") as ftxt: ftxt.write("\n".join(lines) + "\n")
+                    with open(path, "w", encoding="utf-8") as ftxt:
+                        ftxt.write("\n".join(lines) + "\n")
                     self._post("log", f"Saved: {path}"); self._post("add_output", path)
                     self._post("preview_from_file", path)
                 except Exception:
+                    # final fallback: dump raw segment texts
                     with open(path, "w", encoding="utf-8") as ftxt:
                         ftxt.write("\n".join((s.get("text") or "").strip() for s in data_for_export))
                     self._post("log", f"Saved (fallback): {path}"); self._post("add_output", path)
                     self._post("preview_from_file", path)
 
             if self.save_json_var.get():
-                jpath=base+".json"; open(jpath,"w",encoding="utf-8").write(json.dumps(data_for_export, ensure_ascii=False, indent=2))
+                jpath = base + ".json"
+                open(jpath, "w", encoding="utf-8").write(json.dumps(data_for_export, ensure_ascii=False, indent=2))
                 self._post("log", f"Saved: {jpath}"); self._post("add_output", jpath)
             if self.save_csv_var.get():
-                cpath=base+".csv"
-                f=open(cpath,"w",newline="",encoding="utf-8"); w=csv.writer(f); w.writerow(["start","end","text"])
-                for s in data_for_export: w.writerow([s.get("start"), s.get("end"), (s.get("text") or "").strip()])
+                cpath = base + ".csv"
+                f = open(cpath, "w", newline="", encoding="utf-8")
+                w = csv.writer(f); w.writerow(["start", "end", "text"])
+                for s in data_for_export:
+                    w.writerow([s.get("start"), s.get("end"), (s.get("text") or "").strip()])
                 f.close(); self._post("log", f"Saved: {cpath}"); self._post("add_output", cpath)
 
             try: del segments, data_for_export
             except Exception: pass
             _free_all_memory("after save")
 
-        self._post("status","Batch complete."); self._post("log","All done.")
+        self._post("status", "Batch complete."); self._post("log", "All done.")
     except Exception:
-        self._post("status","Error"); self._post("log", traceback.format_exc())
+        self._post("status", "Error"); self._post("log", traceback.format_exc())
     finally:
         _free_all_memory("after batch")
 
 def _run_batch(self):
     if self.media_list.curselection():
-        paths=[self.media_list.get(i) for i in self.media_list.curselection()]
+        paths = [self.media_list.get(i) for i in self.media_list.curselection()]
     else:
-        paths=list(self.media_files)
+        paths = list(self.media_files)
     if not paths:
-        messagebox.showerror("Empty","Add media files first"); return
-    whisper_dir=_model_dir(FASTER_WHISPER_DIR_LABEL)
+        messagebox.showerror("Empty", "Add media files first"); return
+    whisper_dir = _model_dir(FASTER_WHISPER_DIR_LABEL)
     if not whisper_dir:
         messagebox.showerror("Model missing", f"Faster-Whisper model folder not found:\n{FASTER_WHISPER_DIR_LABEL}")
         return
@@ -1872,28 +2018,28 @@ def _find_llama_binary():
     return None
 
 def _resolve_gguf_model():
-    pref = MODELS / "unsloth__Qwen3-4B-Instruct-2507-GGUF" / "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+    pref = MODELS / QWEN_GGUF_DIR_LABEL / QWEN_GGUF_FILENAME
     if pref.exists(): return str(pref)
     for g in MODELS.rglob("*.gguf"): return str(g)
     return None
 
 def _offline_env_for_llama():
-    env=os.environ.copy()
-    for k in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy","NO_PROXY","no_proxy"): env[k]=""
-    env["GGML_NO_RPC"]="1"; env["LLAMA_NO_RPC"]="1"; env["GGML_RPC"]="0"; env["GGML_RPC_SERVERS"]=""
+    env = os.environ.copy()
+    for k in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy","NO_PROXY","no_proxy"): env[k] = ""
+    env["GGML_NO_RPC"] = "1"; env["LLAMA_NO_RPC"] = "1"; env["GGML_RPC"] = "0"; env["GGML_RPC_SERVERS"] = ""
     return env
 
 _NOISE_RE = re.compile(r'^(load_backend|warning|build|main|llama_|print_info|load_tensors|system_info|sampler|generate|== Running in interactive mode\.)', re.I)
-def _is_noise(line:str)->bool: return bool(_NOISE_RE.match(line.strip()))
+def _is_noise(line: str) -> bool: return bool(_NOISE_RE.match(line.strip()))
 
-# --- small normaliser to fix timestamp dash / stray replacements ---
+# Fix odd unicode dashes in timestamps
 _TS_FIX_RE = re.compile(r'(\[\d{2}:\d{2})[^\d](\d{2}:\d{2}\])')
-def _normalise_model_line(s:str)->str:
+def _normalise_model_line(s: str) -> str:
     s = _TS_FIX_RE.sub(r'\1–\2', s)
     s = s.replace("\uFFFD", "–")
     return s
 
-# ----- plain prompts (NO chat/template) -----
+# Plain prompts (NO chat/template wrapper beyond minimal markers)
 def _plain_translate(tgt: str, text: str) -> str:
     return (
         "<|im_start|>system\n"
@@ -1965,11 +2111,11 @@ def _plain_custom(instruction: str, text: str) -> str:
     )
 
 # robust file read (utf-8 -> cp1252)
-def _read_text_multi(path:str)->str:
+def _read_text_multi(path: str) -> str:
     try:
-        return open(path,"r",encoding="utf-8").read()
+        return open(path, "r", encoding="utf-8").read()
     except Exception:
-        try: return open(path,"r",encoding="cp1252").read()
+        try: return open(path, "r", encoding="cp1252").read()
         except Exception: return Path(path).read_text(errors="ignore")
 
 class _LlamaOnceMinimal:
@@ -2014,7 +2160,7 @@ class _LlamaOnceMinimal:
         env = _offline_env_for_llama()
         cwd = str(_llama_vendor_dir())
 
-        # --- Windows: hide console and ensure DLL path ---
+        # Windows: hide console and ensure DLL path
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         creationflags = 0x08000000  # CREATE_NO_WINDOW
@@ -2051,26 +2197,20 @@ class _LlamaOnceMinimal:
                         try:
                             line = line_b.decode("utf-8")
                         except Exception:
-                            try:
-                                line = line_b.decode("cp1252")
-                            except Exception:
-                                line = line_b.decode("latin-1", "ignore")
+                            try: line = line_b.decode("cp1252")
+                            except Exception: line = line_b.decode("latin-1", "ignore")
 
                         if "<<<END>>>" in line:
                             line = line.split("<<<END>>>", 1)[0]
                             line = _normalise_model_line(line)
                             if line:
-                                f.write(line)
-                                f.flush()
-                                wrote = True
+                                f.write(line); f.flush(); wrote = True
                             break
 
                         if not _is_noise(line):
                             line = _normalise_model_line(line)
                             if line:
-                                f.write(line)
-                                f.flush()
-                                wrote = True
+                                f.write(line); f.flush(); wrote = True
 
                     try:
                         proc.wait(timeout=2)
@@ -2078,8 +2218,7 @@ class _LlamaOnceMinimal:
                         pass
                 finally:
                     try:
-                        if proc.poll() is None:
-                            proc.kill()
+                        if proc.poll() is None: proc.kill()
                     except Exception:
                         pass
 
@@ -2090,32 +2229,32 @@ class _LlamaOnceMinimal:
 # ---------- LLM UI hook (NON-BLOCKING) ----------
 def _llm_run_over_outputs(self, task: str, custom_prompt: str | None = None):
     if getattr(self, "_llm_busy", False):
-        self._post("log","[LLM] already running"); return
+        self._post("log", "[LLM] already running"); return
 
-    sel=self.output_list.curselection()
+    sel = self.output_list.curselection()
     if not sel:
-        messagebox.showerror("Select a file","Select a saved output file (right list) first."); return
-    in_path=self.output_list.get(sel[0])
-    src_txt=_read_text_multi(in_path)
+        messagebox.showerror("Select a file", "Select a saved output file (right list) first."); return
+    in_path = self.output_list.get(sel[0])
+    src_txt = _read_text_multi(in_path)
 
     tgt_name, _ = normalise_llm_lang(self.llm_target_lang_var.get())
-    if task=="translate":
-        prompt=_plain_translate(tgt_name, src_txt); suffix=".translated.txt"
-    elif task=="summarise":
-        prompt=_plain_summarise(tgt_name, src_txt); suffix=".summarised.txt"
-    elif task=="correct":
-        prompt=_plain_correct(tgt_name, src_txt); suffix=".corrected.txt"
-    elif task=="custom":
-        prompt=_plain_custom(custom_prompt, src_txt); suffix=".custom.txt"
+    if task == "translate":
+        prompt = _plain_translate(tgt_name, src_txt); suffix = ".translated.txt"
+    elif task == "summarise":
+        prompt = _plain_summarise(tgt_name, src_txt); suffix = ".summarised.txt"
+    elif task == "correct":
+        prompt = _plain_correct(tgt_name, src_txt); suffix = ".corrected.txt"
+    elif task == "custom":
+        prompt = _plain_custom(custom_prompt, src_txt); suffix = ".custom.txt"
     else:
         self._post("log", f"[LLM] unknown task: {task}"); return
 
-    base=Path(in_path); out_path=str(base.with_name(base.stem + suffix))
+    base = Path(in_path); out_path = str(base.with_name(base.stem + suffix))
     try:
-        mx=int(self.llm_max_new.get() or "2048")
+        mx = int(self.llm_max_new.get() or "2048")
     except Exception:
-        mx=2048
-    mx=max(64, min(mx, 30000))
+        mx = 2048
+    mx = max(64, min(mx, 30000))
 
     def _worker():
         setattr(self, "_llm_busy", True)
@@ -2124,41 +2263,23 @@ def _llm_run_over_outputs(self, task: str, custom_prompt: str | None = None):
         try:
             runner = _LlamaOnceMinimal()
 
-            try:
-                mx = int(str(self.llm_max_new.get()).strip())
-            except Exception:
-                mx = 2048
-            mx = max(64, min(mx, 30000))
+            try:    mx_l = int(str(self.llm_max_new.get()).strip())
+            except: mx_l = 2048
+            mx_l = max(64, min(mx_l, 30000))
 
-            try:
-                temp = float(str(self.llm_temp.get()).strip())
-            except Exception:
-                temp = 0.3
-
-            try:
-                top_p = float(str(self.llm_top_p.get()).strip())
-            except Exception:
-                top_p = 0.9
-
-            try:
-                top_k = int(str(self.llm_top_k.get()).strip())
-            except Exception:
-                top_k = 50
-
-            try:
-                rep_pen = float(str(self.llm_rep_pen.get()).strip())
-            except Exception:
-                rep_pen = 1.12
+            try:    temp = float(str(self.llm_temp.get()).strip())
+            except: temp = 0.3
+            try:    top_p = float(str(self.llm_top_p.get()).strip())
+            except: top_p = 0.9
+            try:    top_k = int(str(self.llm_top_k.get()).strip())
+            except: top_k = 50
+            try:    rep_pen = float(str(self.llm_rep_pen.get()).strip())
+            except: rep_pen = 1.12
 
             runner.run_to_file(
-                prompt,
-                out_path,
-                max_new=mx,
-                timeout_sec=900,
-                temp=temp,
-                top_p=top_p,
-                top_k=top_k,
-                repeat_penalty=rep_pen,
+                prompt, out_path,
+                max_new=mx_l, timeout_sec=900,
+                temp=temp, top_p=top_p, top_k=top_k, repeat_penalty=rep_pen,
             )
 
             self._post("add_output", out_path)
@@ -2200,11 +2321,11 @@ def _load_icon_if_present(app: tk.Tk):
         pass
 
 def main():
-    # Make sure ffmpeg is resolvable; do not spam logs
+    # Lazy FFmpeg: don't block UI if missing — playback/decoding paths will surface scoped errors later.
     try:
         _ = ffmpeg_path()
     except SystemExit:
-        return
+        pass
     except Exception:
         pass
 
