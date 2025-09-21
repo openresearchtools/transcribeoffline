@@ -1,4 +1,4 @@
-Transcribe Offline v1.2 by openresearchtools.com
+***Transcribe Offline v1.2*** by openresearchtools.com
 
 ***Transcribe Offline*** is a desktop application that allows you to transcribe audio and video fully offline, with optional speaker diarization and word-level alignment. It can also generate subtitles and integrate with local large language models (LLMs) for summarization and editing. The app is designed to keep all media private on your device, but as globally cyber threats are increasing, when working with sensitive data, we would recommend setting up additional firewall or using on the machines with no access to network.
 
