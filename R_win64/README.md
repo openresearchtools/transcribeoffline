@@ -1,9 +1,6 @@
 # Transcribe Offline (Windows, RStudio)
 
 Local-first audio/video transcription with optional **word alignment** and **speaker diarisation**, plus built‑in tools for **translation**, **summarisation**, and **grammar correction** using a local LLM. Everything runs **offline on your PC** — no uploads.
-
-> **Platform:** This README documents the **Windows 64‑bit** build launched via **RStudio**. Other platforms are not covered here.
-
 ---
 
 ## Highlights
