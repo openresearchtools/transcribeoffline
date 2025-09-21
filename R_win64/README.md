@@ -83,18 +83,12 @@
 
 ---
 
-## Privacy
-
-- The app **blocks all network sockets** at startup.  
-- Models and audio are processed locally. No telemetry, no uploads.
-
----
-
 ## System requirements (minimum)
 
 - **Windows 10/11 64‑bit**  
 - **RStudio (Windows x64)** installed  
-- Sufficient disk space for models (several GB for Whisper/LLM models)  
+- **16GB RAM***
+- **10GB Disk Space***
 - CPU with multiple cores recommended for faster processing  
 - Audio output device (for in‑app playback)
 
