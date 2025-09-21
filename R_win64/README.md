@@ -21,7 +21,7 @@
 - **pyannote.audio** — speaker diarization  
 - **Transformers** — model utilities and tokenizers  
 - **sounddevice / soundfile** — audio playback  
-- **FFmpeg (LGPL v2.1+)** — bundled win64 `lgpl-shared` build from BtbN (not statically linked)
+- **FFmpeg (LGPL v2.1+)** — bundled win64 `lgpl-shared` build from BtbN
 
 ### Local LLMs
 - **llama.cpp** — CPU‑only binaries used to run local models  
