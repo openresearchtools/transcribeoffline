@@ -1,7 +1,8 @@
 # Transcribe Offline (Windows, RStudio)
 <img width="1265" height="934" alt="potatoes" src="https://github.com/user-attachments/assets/e73618c4-ccd1-4fe8-a7cc-e2800aa65ef2" />
 
-Local-first audio/video transcription with optional **word alignment** and **speaker diarisation**, plus built‑in tools for **translation**, **summarisation**, and **grammar correction** using a local LLM. Everything runs **offline on your PC** — no uploads.
+</p>**Transcribe Offline** by <a href="https://openresearchtools.com">openresearchtools.com</a> is a desktop application for **fully local** speech‑to‑text with optional **speaker diarisation** and **word‑level alignment**. It can also create **subtitles** and plug into local LLMs for **summaries** and **light edits** — all on your machine, with no cloud uploads.
+
 ---
 
 ## Highlights
