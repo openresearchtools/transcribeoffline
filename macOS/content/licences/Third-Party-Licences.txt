@@ -36,10 +36,10 @@ pillow                       11.3.0        MIT CMU                              
 primePy                      1.3           MIT License                                    https://github.com/janaindrajit/primePy
 psutil                       7.0.0         BSD License                                    https://github.com/giampaolo/psutil
 pyannote.audio               3.3.2         MIT License                                    https://github.com/pyannote/pyannote-audio
-pyannote.core                5.0.0         MIT License                                    http://pyannote.github.io/
-pyannote.database            5.1.3         MIT License                                    http://pyannote.github.io/
-pyannote.metrics             3.2.1         MIT License                                    https://pyannote.github.io/pyannote-metrics
-pyannote.pipeline            3.0.1         MIT License                                    http://pyannote.github.io/
+pyannote.core                6.0.0         MIT License                                    http://pyannote.github.io/
+pyannote.database            6.0.0         MIT License                                    http://pyannote.github.io/
+pyannote.metrics             4.0.0         MIT License                                    https://pyannote.github.io/pyannote-metrics
+pyannote.pipeline            4.0.0         MIT License                                    http://pyannote.github.io/
 pyparsing                    3.2.3         MIT License                                    https://github.com/pyparsing/pyparsing/
 python-dateutil              2.9.0.post0   Apache-2.0; BSD License                        https://github.com/dateutil/dateutil
 pytorch-lightning            2.5.3         Apache-2.0                                     https://github.com/Lightning-AI/lightning
