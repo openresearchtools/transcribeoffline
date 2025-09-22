@@ -44,7 +44,7 @@ PyInstaller build and distributed with the application.
 ## Option 1) Pre‑compiled app
 
 You can download a pre‑built app here:  
-**Downloads:** [Transcribe Offline MacOS arm](https://drive.google.com/file/d/1Kbqw0hG9O01G_oUT2V5FdNDdQGzrTv1R/view?usp=sharing)
+**Downloads:** [Transcribe Offline v1.2 MacOS](https://drive.google.com/file/d/1Kbqw0hG9O01G_oUT2V5FdNDdQGzrTv1R/view?usp=sharing)
 
 We’re a small open‑source team and do not currently hold a paid Apple Developer subscription for notarisation. As a result, macOS may block the first launch.
 
