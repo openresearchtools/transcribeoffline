@@ -662,7 +662,7 @@ def _proc_align_entry(job: dict, out_q):
             1 for s in segments2 for w in (s.get("words") or [])
             if isinstance(w, dict) and isinstance(w.get("start"), (int,float)) and isinstance(w.get("end"), (int,float))
         )
-        out_q.put(("log", f"Normalized: words_ts={nwords_ts}/{nwords} across {nseg} segments"))
+        out_q.put(("log", f"Normalised: words_ts={nwords_ts}/{nwords} across {nseg} segments"))
         out_q.put(("log", f"Alignment: done in {time.perf_counter()-t0:.2f}s"))
         out_q.put(("segments", segments2))
     except Exception:
@@ -1834,7 +1834,7 @@ class App(tk.Tk):
             seg_dir = _model_dir(PYA_SEG_LABEL)
             emb_dir = _model_dir(PYA_EMB_LABEL)
             if seg_dir and emb_dir:
-                self._post("log", "[Stage] Diarize → start")
+                self._post("log", "[Stage] Diarise → start")
                 job3 = {
                     "media_path": media_path,
                     "segments": segments,
@@ -1847,7 +1847,7 @@ class App(tk.Tk):
                 if res3:
                     segments = res3
                 else:
-                    self._post("log", "[Diar] Failed or skipped; continuing without diarization.")
+                    self._post("log", "[Diar] Failed or skipped; continuing without diarisation.")
             else:
                 self._post("log", "[Diar] Skipped: Local model not found.")
         return segments
