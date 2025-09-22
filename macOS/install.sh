@@ -142,11 +142,11 @@ log "Installing your pinned packages (no deps)..."
   pillow==11.3.0 \
   primePy==1.3 \
   psutil==7.0.0 \
-  pyannote.audio==3.3.2 \
-  pyannote.core==5.0.0 \
-  pyannote.database==5.1.3 \
-  pyannote.metrics==3.2.1 \
-  pyannote.pipeline==3.0.1 \
+  pyannote.audio==3.4.0 \
+  pyannote.core==6.0.0 \
+  pyannote.database==6.0.0 \
+  pyannote.metrics==4.0.0 \
+  pyannote.pipeline==4.0.0 \
   pyparsing==3.2.3 \
   python-dateutil==2.9.0.post0 \
   pytorch-lightning==2.5.3 \
