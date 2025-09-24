@@ -28,8 +28,6 @@
 - **Default model reference:** Qwen3 4‑bit
 
 ---
-Set-ExecutionPolicy -Scope Process Bypass -Force; iex (irm 'https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.PS1')
-
 ## Option 1 Install & Run via Python 3.11 (Windows 64‑bit)
 
 ### One‑time setup
