@@ -37,15 +37,18 @@
 
 1. Open **RStudio (Windows 64‑bit)**.
 2. Run the following command in the console
-    ```source("https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.R")```
+    ```
+   source("https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.R")
+    ```
 By default, the script installs the app into your **Downloads** folder.  
-3. Follow the instructions and Download the models in the window that opens
-4. To run the app:
+4. Follow the instructions for gated models and download the models in the window that opens
 
 
 ### Launching the app after install
 Paste and run this in R studio console
-```source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'))```
+```
+source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'))
+```
 
 ---
 
