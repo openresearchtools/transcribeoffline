@@ -55,13 +55,14 @@ Desktop Shortcut, as well as Shortcuts for model downloader and the app itself w
 
 ### One‑time setup
 
-1. Open **RStudio (Windows 64‑bit)**.
-2. Run the following command in the console
+1. Make sure you have [**R**](https://cran.rstudio.com/) and [**R Studio (Windows 64bit)**](https://posit.co/download/rstudio-desktop/) Installed
+2.  Open **RStudio**.
+3. Run the following command in the console
     ```
    source("https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.R")
     ```
  By default, the script installs the app into your **Downloads** folder.  
-3. Follow the instructions for gated models and download the models in the window that opens
+4. Follow the instructions for gated models and download the models in the window that opens
 
 
 ### Launching the app after install
