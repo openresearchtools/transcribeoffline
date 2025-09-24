@@ -34,8 +34,9 @@
 
 1. Make sure you have **Python 3.11 installed and set on system path**, if not, we recommend using official Python distribution [https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe](https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe)
 2. Open Windows Powershell **Win + R**, type **powershell** and press **enter**
+   
    <img width="404" height="210" alt="image" src="https://github.com/user-attachments/assets/dce49f98-6782-4351-8164-687dac9a4d51" />
-3. Run the following command in the console.
+4. Run the following command in the console.
     ```
    Set-ExecutionPolicy -Scope Process Bypass -Force; iex (irm 'https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.PS1')
     ```
