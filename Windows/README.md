@@ -36,17 +36,16 @@
 ### One‑time setup
 
 1. Open **RStudio (Windows 64‑bit)**.
-2. Download **[setup_transcribe_offline.R](https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/R_win64/setup_transcribe_offline.R)**.  
-3. Open the script in RStudio, **select all**, and click **Run**.  
-   - By default, the script installs the app into your **Downloads** folder.  
-   - After installation, a **model download GUI** appears so you can fetch speech/LLM models.
+2. Run the following command in the console
+    ```source("https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.R")```
+By default, the script installs the app into your **Downloads** folder.  
+3. Follow the instructions and Download the models in the window that opens
+4. To run the app:
+
 
 ### Launching the app after install
-
-- Use the generated **`run_transcribe_offline.R`** (created by the setup script).  
-- If you see errors on first run, set the working directory to the app folder and retry:
-  - RStudio → **Session → Set Working Directory → Choose Directory…** → select **`Transcribe_Offline`**
-  - Run **`run_transcribe_offline.R`** again.
+Paste and run this in R studio console
+```source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'))```
 
 ---
 
