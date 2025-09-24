@@ -236,7 +236,7 @@ if (!file.exists(file.path(dirs$llama, "llama-cli.exe"))) halt("llama-cli.exe no
 wlog("llama.cpp OK.")
 
 # Download models.py (GUI) into the project root
-models_url <- "https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/R_win64/models.py"
+models_url <- "https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/models.py"
 models_path <- file.path(proj_dir, "models.py")
 dl(models_url, models_path, mode = "wb")
 wlog("Downloaded models.py:", models_path)
@@ -281,3 +281,4 @@ wlog("DONE.")
 wlog(sprintf("Project: %s", proj_dir))
 wlog("Runner:  %s", file.path(proj_dir, "run_transcribe_offline.R"))
 wlog("You can re-open the app later with: source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'))")
+
