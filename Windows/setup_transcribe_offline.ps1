@@ -11,7 +11,7 @@
   • Creates shortcuts with icon:
       - Desktop: "Transcribe Offline"
       - In-folder: "Transcribe Offline", "Download Models"
-  • Auto-opens Models Downloader at the end (hidden; **direct pythonw.exe**, not a new PowerShell)
+  • Auto-opens Models Downloader at the end (hidden) with venv ACTIVATED
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -211,8 +211,8 @@ function Download-File([string]$Url, [string]$Dest, [ValidateSet('Text','Binary'
 }
 
 $RAW = 'https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows'
-Download-File "$RAW/main.py"    (Join-Path $ProjDir 'main.py')
-Download-File "$RAW/models.py"  (Join-Path $ProjDir 'models.py')
+Download-File "$RAW/main.py"                                   (Join-Path $ProjDir 'main.py')
+Download-File "$RAW/models.py"                                 (Join-Path $ProjDir 'models.py')
 Download-File "$RAW/content/AppIcon.ico"                       (Join-Path $Dirs.content  'AppIcon.ico')
 Download-File "$RAW/content/licenses/LICENSE.txt"              (Join-Path $Dirs.licenses 'LICENSE.txt') -Mode Text
 Download-File "$RAW/content/licenses/README.md"                (Join-Path $Dirs.licenses 'README.md')   -Mode Text
@@ -368,11 +368,19 @@ New-Shortcut -Path (Join-Path $ProjDir 'Download Models.lnk') `
              -Ps1Target (Join-Path $ProjDir 'download_models.ps1') `
              -IconPath $IconPath -WorkingDir $ProjDir
 
-# --- Auto-open Models Downloader (hidden, direct pythonw.exe) -----------------
+# --- Auto-open Models Downloader (hidden, venv ACTIVATED) ---------------------
 Write-Log ""
-Write-Log "Launching Models Downloader (hidden, direct)…"
+Write-Log "Launching Models Downloader (hidden, venv-activated)…"
 
-# Match launcher env so downloads cache in content\models and vendors are on PATH
+# 1) Activate the venv in THIS PowerShell so the child inherits it
+$activate = Join-Path $VenvDir 'Scripts\Activate.ps1'
+if (Test-Path -LiteralPath $activate) {
+  . $activate
+} else {
+  Halt "Activate.ps1 missing in venv at $VenvDir."
+}
+
+# 2) Match launcher env so downloads cache in content\models and vendors are on PATH
 $env:KMP_DUPLICATE_LIB_OK   = 'TRUE'
 $env:TOKENIZERS_PARALLELISM = 'false'
 $env:HF_HOME               = $Dirs.models
@@ -380,9 +388,11 @@ $env:HUGGINGFACE_HUB_CACHE = $Dirs.models
 $env:TRANSFORMERS_CACHE    = $Dirs.models
 $env:PATH = (Join-Path $Dirs.vendor 'ffmpeg') + ';' + (Join-Path $Dirs.vendor 'llama.cpp') + ';' + $env:PATH
 
+# 3) Prefer pythonw.exe from the venv (fallback to python.exe if needed)
 $VenvWPy  = Join-Path $VenvDir 'Scripts\pythonw.exe'
-$PyForRun = if (Test-Path -LiteralPath $VenvWPy) { $VenvWPy } else { $VenvPy }
+$PyForRun = if (Test-Path -LiteralPath $VenvWPy) { $VenvWPy } else { Join-Path $VenvDir 'Scripts\python.exe' }
 
+# 4) Launch models.py hidden
 Start-Process -FilePath $PyForRun -ArgumentList @(
   '-u', (Join-Path $ProjDir 'models.py')
 ) -WorkingDirectory $ProjDir -WindowStyle Hidden | Out-Null
