@@ -28,6 +28,26 @@
 - **Default model reference:** Qwen3 4‑bit
 
 ---
+Set-ExecutionPolicy -Scope Process Bypass -Force; iex (irm 'https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.PS1')
+
+## Option 1 Install & Run via Python 3.11 (Windows 64‑bit)
+
+### One‑time setup
+
+1. Make sure you have Python 3.11 installed, if not, we recommend using official Python distribution [https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe](https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe)
+2. Open Windows Powershell Win + R 
+3. Run the following command in the console.
+    ```
+   Set-ExecutionPolicy -Scope Process Bypass -Force; iex (irm 'https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.PS1')
+    ```
+By default, the script installs the app into your **Downloads** folder.  
+4. Follow the instructions for gated models and download the models in the window that opens
+
+
+### Launching the app after install
+Desktop Shortcut, as well as Shortcuts for model downloader and the app itself will be created in the app folder, **simply double-click Transcribe Offline**.
+
+---
 
 ## Option 2 Install & Run via RStudio (Windows 64‑bit)
 
@@ -40,8 +60,8 @@
     ```
    source("https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.R")
     ```
-By default, the script installs the app into your **Downloads** folder.  
-4. Follow the instructions for gated models and download the models in the window that opens
+ By default, the script installs the app into your **Downloads** folder.  
+3. Follow the instructions for gated models and download the models in the window that opens
 
 
 ### Launching the app after install
