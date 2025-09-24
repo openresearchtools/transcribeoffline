@@ -85,7 +85,6 @@ Researchers, lecturers, and professional practitioners who need dependable, loca
 
 - **macOS project page:** <https://github.com/openresearchtools/transcribeoffline/tree/main/macOS>  
 - **Windows project page:** <https://github.com/openresearchtools/transcribeoffline/tree/main/Windows>  
-- **RStudio integration on Windows:** <https://github.com/openresearchtools/transcribeoffline/tree/main/R_win64>
 
 > If you’re evaluating for institutional use, test with non‑sensitive audio first, then review logs/exports with your IT or data guardian.
 
