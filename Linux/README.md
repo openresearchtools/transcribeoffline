@@ -1,4 +1,4 @@
-# Transcribe Offline (Linux - tested on Ubuntu 23.04 LTS)
+# Transcribe Offline (Built using Ubuntu 24.04 LTS)
 <img width="1265" height="934" alt="potatoes" src="https://github.com/user-attachments/assets/e73618c4-ccd1-4fe8-a7cc-e2800aa65ef2" />
 
 </p>**Transcribe Offline** by <a href="https://openresearchtools.com">openresearchtools.com</a> is a desktop application for **fully local** speech‑to‑text with optional **speaker diarisation** and **word‑level alignment**. It can also create **subtitles** and plug into local LLMs for **summaries** and **light edits** — all on your machine, with no cloud uploads.
