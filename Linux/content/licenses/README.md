@@ -13,7 +13,7 @@ we would recommend setting up additional firewall or using on the machines with 
 * [pyannote.audio](https://github.com/pyannote/pyannote-audio) — speaker diarization
 * [Transformers](https://github.com/huggingface/transformers) — model utilities and tokenizers
 * [Sounddevice / Soundfile](https://python-sounddevice.readthedocs.io/) — audio playback
-* **FFmpeg** (LGPL v2.1+) bundled **win64 lgpl‑shared** build from BtbN.
+* **FFmpeg** (Not bundled, but users are prompted to install themselves)
 
 **Local LLMs:**
 
