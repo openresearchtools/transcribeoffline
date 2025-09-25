@@ -58,35 +58,23 @@ export TRANSFORMERS_CACHE="$MODELS_DIR"
 # =====================================================================
 RAW_BASE='https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Linux'
 
-# Ensure we can download
 ensure_downloader() {
-  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
-    return 0
-  fi
+  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then return 0; fi
   log "Installing 'curl' (sudo)…"
   sudo apt-get update -y
-  sudo apt-get install -y curl
+  sudo apt-get install -y curl ca-certificates
 }
 
-# download_file URL OUTPATH [mode:text|bin]
 download_file() {
   local url="$1"; local out="$2"; local mode="${3:-bin}"
   mkdir -p "$(dirname "$out")"
   local tmp="$out.__tmp__"
   if command -v curl >/dev/null 2>&1; then
-    if ! curl -fsSL -o "$tmp" "$url"; then
-      rm -f "$tmp"; return 1
-    fi
+    curl -fsSL -o "$tmp" "$url" || { rm -f "$tmp"; return 1; }
   else
-    if ! wget -qO "$tmp" "$url"; then
-      rm -f "$tmp"; return 1
-    fi
+    wget -qO "$tmp" "$url" || { rm -f "$tmp"; return 1; }
   fi
-  # For text mode, normalize line endings lightly (no-op for most Linux content)
-  if [[ "$mode" == "text" ]]; then
-    # Strip CR if present
-    tr -d '\r' < "$tmp" > "${tmp}.t" && mv -f "${tmp}.t" "$tmp"
-  fi
+  if [[ "$mode" == "text" ]]; then tr -d '\r' < "$tmp" > "${tmp}.t" && mv -f "${tmp}.t" "$tmp"; fi
   mv -f "$tmp" "$out"
 }
 
@@ -97,14 +85,11 @@ fetch_if_missing() {
     return 0
   fi
   log "Downloading: $url -> $out"
-  if ! download_file "$url" "$out" "$mode"; then
-    halt "Failed to download: $url"
-  fi
+  download_file "$url" "$out" "$mode" || halt "Failed to download: $url"
 }
 
 ensure_downloader
 
-# Files to fetch
 fetch_if_missing "$RAW_BASE/main.py"                                   "$PROJ_DIR/main.py"                  text
 fetch_if_missing "$RAW_BASE/models.py"                                 "$PROJ_DIR/models.py"                text
 fetch_if_missing "$RAW_BASE/content/AppIcon.png"                       "$CONTENT_DIR/AppIcon.png"           bin
@@ -112,7 +97,6 @@ fetch_if_missing "$RAW_BASE/content/licenses/LICENSE.txt"              "$LICENSE
 fetch_if_missing "$RAW_BASE/content/licenses/README.MD"                "$LICENSES_DIR/README.MD"            text
 fetch_if_missing "$RAW_BASE/content/licenses/Third-Party-Licenses.txt" "$LICENSES_DIR/Third-Party-Licenses.txt" text
 
-# Validate main.py presence
 [[ -s "$PROJ_DIR/main.py" ]] || halt "main.py missing after download."
 
 # =====================================================================
@@ -160,12 +144,14 @@ install_py311_via_deadsnakes() {
   sudo apt-get install -y software-properties-common
   sudo add-apt-repository -y ppa:deadsnakes/ppa
   sudo apt-get update
+  # Install all three explicitly here (includes python3.11-tk)
   sudo apt-get install -y python3.11 python3.11-venv python3.11-tk
   rc=$?
   set -e
   return $rc
 }
 
+# Try base repos, then Deadsnakes if missing
 if have_py311; then
   PY311="python3.11"
 else
@@ -176,14 +162,23 @@ else
   PY311="python3.11"
 fi
 
-# Tkinter check on base 3.11
+# Tkinter check on base 3.11 (hard fail if not present)
 log "Checking Tkinter on base Python 3.11…"
 if ! "$PY311" - <<'PY'
 import tkinter as tk  # noqa: F401
 print("OK")
 PY
 then
-  halt "Tkinter not available in Python 3.11. Ensure 'python3.11-tk' is installed."
+  # One last attempt: ensure tk package, then re-check
+  log "Tkinter import failed — installing python3.11-tk from Deadsnakes (sudo)…"
+  set +e
+  sudo apt-get update
+  sudo apt-get install -y python3.11-tk
+  set -e
+  "$PY311" - <<'PY' || halt "Tkinter still missing for Python 3.11 after install."
+import tkinter as tk
+print("OK")
+PY
 fi
 log "Tkinter OK on base."
 
@@ -203,7 +198,6 @@ log "Upgrading pip/setuptools/wheel in venv…"
 "$VENV_PY" -m pip install --upgrade pip setuptools wheel
 
 REQ_FILE="$PROJ_DIR/requirements-pinned.txt"
-# IMPORTANT: torch and torchaudio are intentionally OMITTED here; we install CPU wheels later.
 cat >"$REQ_FILE" <<'REQS'
 asteroid-filterbanks==0.4.0
 av==15.1.0
@@ -364,7 +358,6 @@ if [[ "$needs_fix" == "1" ]]; then
   "$VENV_PY" -m pip uninstall -y ctranslate2 || true
   "$VENV_PY" -m pip install --no-deps --only-binary=:all: "ctranslate2==4.6.0"
 
-  # Re-check import; if still failing, fall back to 4.4.0 CPU wheel
   if ! "$VENV_PY" - <<'PY'
 try:
     import faster_whisper  # noqa: F401
@@ -378,7 +371,6 @@ PY
     log "CPU wheel 4.6.0 still failed — falling back to 4.4.0 (CPU)…"
     "$VENV_PY" -m pip uninstall -y ctranslate2 || true
     "$VENV_PY" -m pip install --no-deps --only-binary=:all: "ctranslate2==4.4.0"
-
     "$VENV_PY" - <<'PY'
 import faster_whisper
 print("OK (CT2=4.4.0)")
@@ -416,23 +408,14 @@ log "Extracting llama.cpp…"
 TMP_LL="$(mktemp -d)"
 unzip -q "$LLAMA_ZIP" -d "$TMP_LL"
 
-# Copy tools + libs into vendor/llama.cpp (cover both bin/ and lib/ layouts)
-if [[ -d "$TMP_LL/build/bin" ]]; then
-  cp -a "$TMP_LL/build/bin/." "$LLAMA_DIR/"
-fi
-if [[ -d "$TMP_LL/build/lib" ]]; then
-  cp -a "$TMP_LL/build/lib/." "$LLAMA_DIR/"
-fi
-# Fallback: unexpected layout
+if [[ -d "$TMP_LL/build/bin" ]]; then cp -a "$TMP_LL/build/bin/." "$LLAMA_DIR/"; fi
+if [[ -d "$TMP_LL/build/lib" ]]; then cp -a "$TMP_LL/build/lib/." "$LLAMA_DIR/"; fi
 if [[ ! -e "$LLAMA_DIR/llama-cli" && ! -e "$LLAMA_DIR/bin/llama-cli" ]]; then
   cp -a "$TMP_LL/." "$LLAMA_DIR/" || true
 fi
 rm -rf "$TMP_LL"
-
-# Make executables usable
 find "$LLAMA_DIR" -maxdepth 1 -type f -name "llama*" -exec chmod +x {} \; || true
 
-# Verify presence of llama-cli
 if [[ ! -x "$LLAMA_DIR/llama-cli" && ! -x "$LLAMA_DIR/bin/llama-cli" ]]; then
   halt "llama-cli not found after extraction (checked $LLAMA_DIR and $LLAMA_DIR/bin)."
 fi
@@ -455,22 +438,17 @@ if [[ ! -x "$VENV_DIR/bin/python" ]]; then
   exit 1
 fi
 
-# Use the SAME venv Python and make its tools first on PATH (includes 'hf')
 export VIRTUAL_ENV="$VENV_DIR"
 export PATH="$VENV_DIR/bin:$SCRIPT_DIR/content/vendor/llama.cpp:$PATH"
 unset PYTHONHOME
 
-# Keep model caches in-project
 export HF_HOME="$SCRIPT_DIR/content/models"
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
 export TRANSFORMERS_CACHE="$HF_HOME"
 
-# Misc envs used by the app
 export TOKENIZERS_PARALLELISM=false
 export KMP_DUPLICATE_LIB_OK=TRUE
-# Ensure llama shared libs are discoverable if needed
 export LD_LIBRARY_PATH="$SCRIPT_DIR/content/vendor/llama.cpp:${LD_LIBRARY_PATH:-}"
-# Force CPU-only path for CT2 / Torch
 export CUDA_VISIBLE_DEVICES=""
 
 exec "$VENV_DIR/bin/python" -u "$SCRIPT_DIR/main.py" "$@"
@@ -488,12 +466,10 @@ if [[ ! -x "$VENV_DIR/bin/python" ]]; then
   exit 1
 fi
 
-# Use the SAME venv Python and make its tools first on PATH (includes 'hf')
 export VIRTUAL_ENV="$VENV_DIR"
 export PATH="$VENV_DIR/bin:$SCRIPT_DIR/content/vendor/llama.cpp:$PATH"
 unset PYTHONHOME
 
-# Keep model caches in-project
 export HF_HOME="$SCRIPT_DIR/content/models"
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
 export TRANSFORMERS_CACHE="$HF_HOME"
@@ -518,16 +494,13 @@ APP_ICON_PNG="$CONTENT_DIR/AppIcon.png"
 if [[ -f "$APP_ICON_PNG" ]]; then
   APP_ICON="$APP_ICON_PNG"
 else
-  APP_ICON="utilities-terminal"  # fallback system icon
+  APP_ICON="utilities-terminal"
 fi
 
-# We use Tk's default WM class ("Tk") so we don't have to change your Python.
-# If you later set a custom WM class in main.py, update STARTUP_WMCLASS here to match.
 STARTUP_WMCLASS="Tk"
 
 make_desktop() {
   local name="$1" exec_path="$2" icon="$3" out="$4" wmclass="$5" workdir="$6"
-  # NOTE: Exec must be unquoted; Path sets working directory.
   cat >"$out" <<EOF
 [Desktop Entry]
 Type=Application
@@ -546,13 +519,11 @@ EOF
   chmod +x "$out"
 }
 
-# Desktop entries (may need right-click ▸ Allow Launching once)
 DESK_MAIN="$DESK/Transcribe Offline.desktop"
 DESK_MODELS="$DESK/Download Models.desktop"
 make_desktop "Transcribe Offline" "$RUN_MAIN" "$APP_ICON" "$DESK_MAIN" "$STARTUP_WMCLASS" "$PROJ_DIR"
 make_desktop "Download Models" "$RUN_MODELS" "$APP_ICON" "$DESK_MODELS" "$STARTUP_WMCLASS" "$PROJ_DIR"
 
-# App menu entries
 APPS_DIR="$HOME/.local/share/applications"
 mkdir -p "$APPS_DIR"
 APP_MAIN_DESKTOP="$APPS_DIR/transcribe-offline.desktop"
@@ -560,21 +531,18 @@ APP_MODELS_DESKTOP="$APPS_DIR/transcribe-offline-models.desktop"
 make_desktop "Transcribe Offline" "$RUN_MAIN" "$APP_ICON" "$APP_MAIN_DESKTOP" "$STARTUP_WMCLASS" "$PROJ_DIR"
 make_desktop "Download Models" "$RUN_MODELS" "$APP_ICON" "$APP_MODELS_DESKTOP" "$STARTUP_WMCLASS" "$PROJ_DIR"
 
-# In-folder launchers (with icons)
 IN_FOLDER_MAIN="$PROJ_DIR/Transcribe Offline.desktop"
 IN_FOLDER_MODELS="$PROJ_DIR/Download Models.desktop"
 make_desktop "Transcribe Offline" "$RUN_MAIN" "$APP_ICON" "$IN_FOLDER_MAIN" "$STARTUP_WMCLASS" "$PROJ_DIR"
 make_desktop "Download Models" "$RUN_MODELS" "$APP_ICON" "$IN_FOLDER_MODELS" "$STARTUP_WMCLASS" "$PROJ_DIR"
 
-# Refresh desktop DB (best effort)
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS_DIR" || true
 
-# Mark as trusted so GNOME doesn’t warn (best effort)
 if command -v gio >/dev/null 2>&1; then
-  gio set "$DESK_MAIN"          metadata::trusted true 2>/dev/null || true
-  gio set "$DESK_MODELS"        metadata::trusted true 2>/dev/null || true
-  gio set "$IN_FOLDER_MAIN"     metadata::trusted true 2>/dev/null || true
-  gio set "$IN_FOLDER_MODELS"   metadata::trusted true 2>/dev/null || true
+  gio set "$DESK_MAIN"        metadata::trusted true 2>/dev/null || true
+  gio set "$DESK_MODELS"      metadata::trusted true 2>/dev/null || true
+  gio set "$IN_FOLDER_MAIN"   metadata::trusted true 2>/dev/null || true
+  gio set "$IN_FOLDER_MODELS" metadata::trusted true 2>/dev/null || true
 fi
 
 # =====================================================================
@@ -594,11 +562,9 @@ echo "  • Desktop icon 'Download Models' or:"
 echo "  \"$RUN_MODELS\""
 echo
 
-# Auto-open the Model Downloader now (background) if models.py is present
 if [[ -f "$PROJ_DIR/models.py" ]]; then
   log "Launching Models Downloader with venv…"
   nohup "$RUN_MODELS" >/dev/null 2>&1 &
 else
   log "models.py not found in $PROJ_DIR — skipping auto-launch."
 fi
-
