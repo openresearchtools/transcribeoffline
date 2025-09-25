@@ -1,4 +1,4 @@
-# Transcribe Offline (Windows x64)
+# Transcribe Offline (Linux - tested on Ubuntu 23.04 LTS)
 <img width="1265" height="934" alt="potatoes" src="https://github.com/user-attachments/assets/e73618c4-ccd1-4fe8-a7cc-e2800aa65ef2" />
 
 </p>**Transcribe Offline** by <a href="https://openresearchtools.com">openresearchtools.com</a> is a desktop application for **fully local** speech‑to‑text with optional **speaker diarisation** and **word‑level alignment**. It can also create **subtitles** and plug into local LLMs for **summaries** and **light edits** — all on your machine, with no cloud uploads.
@@ -21,55 +21,30 @@
 - **pyannote.audio** — speaker diarization  
 - **Transformers** — model utilities and tokenizers  
 - **sounddevice / soundfile** — audio playback  
-- **FFmpeg (LGPL v2.1+)** — bundled win64 `lgpl-shared` build from BtbN
-
+- FFmpeg — not bundled but user installation required
 ### Local LLMs
 - **llama.cpp** — CPU‑only binaries used to run local models  
 - **Default model reference:** Qwen3 4‑bit
 
 ---
-## Option 1 Install & Run via Python 3.11 (Windows 64‑bit)
+## Run via Python 3.11-Tk (Important part is TK, as default Python does not ship Tkinter on Linux)
 
 ### One‑time setup
 
-1. Make sure you have **Python 3.11 installed and set on system path**, if not, we recommend using official Python distribution [https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe](https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe)
-2. Open Windows Powershell **Win + R**, type **powershell** and press **enter**
-   
-   <img width="404" height="210" alt="image" src="https://github.com/user-attachments/assets/dce49f98-6782-4351-8164-687dac9a4d51" />
-4. Run the following command in the console.
+1. Make sure you have **FFmpeg** installed. If not, open **Terminal** and use the following command:
     ```
-   Set-ExecutionPolicy -Scope Process Bypass -Force; iex (irm 'https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.PS1')
+    sudo apt-get update && sudo apt-get install -y ffmpeg
     ```
-By default, the script installs the app into your **Downloads** folder.  
-4. Follow the instructions for gated models and download the models in the window that opens
+2. Run the following command in Terminal.
+    ```
+   bash -c 'set -e; URL="https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Linux/setup_transcribe_offline_ubuntu.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$URL" | bash; elif command -v wget >/dev/null 2>&1; then wget -qO- "$URL" | bash; else sudo apt-get update -y && sudo apt-get install -y curl && curl -fsSL "$URL" | bash; fi'
+    ```
+By default, script checks if you have **Python 3.11-Tk** (Important part is TK, as default Python does not ship Tkinter on Linux), if not, then it installs Python 3.11-Tk, creates virtual environment and installs the app into your **Downloads** folder.  
+3. Follow the instructions for gated models and download the models in the window that opens
 
 
 ### Launching the app after install
-Desktop Shortcut, as well as Shortcuts for model downloader and the app itself will be created in the app folder, **simply double-click Transcribe Offline**.
-
----
-
-## Option 2 Install & Run via RStudio (Windows 64‑bit)
-
-> **Important:** Supported **only in RStudio on Windows x64** (tested in RStudio). Other R IDEs are not supported.
-
-### One‑time setup
-
-1. Make sure you have [**R**](https://cran.rstudio.com/) and [**R Studio (Windows 64bit)**](https://posit.co/download/rstudio-desktop/) Installed
-2.  Open **RStudio**.
-3. Run the following command in the console
-    ```
-   source("https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.R")
-    ```
- By default, the script installs the app into your **Downloads** folder.  
-4. Follow the instructions for gated models and download the models in the window that opens
-
-
-### Launching the app after install
-Paste and run this in R studio console
-```
-source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'))
-```
+**Desktop Shortcuts**, for model downloader and the app itself will be created, or you can run from app folder by using **secondary click --> run as a program** on **run_transcribe_offline.sh**
 
 ---
 
@@ -108,32 +83,11 @@ source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'
 
 ## System requirements (minimum)
 
-- **Windows 10/11 64‑bit**  
-- **RStudio (Windows x64)** installed  
+- **Ubuntu based 64‑bit system** 
 - **16GB RAM***
 - **10GB Disk Space***
 - CPU with multiple cores recommended for faster processing  
 - Audio output device (for in‑app playback)
-
----
-
-## Troubleshooting
-
-**The app didn’t start from RStudio**  
-- Ensure you ran **`setup_transcribe_offline.R`** to completion.  
-- Set working directory to **`Transcribe_Offline`** and run **`run_transcribe_offline.R`** again.  
-
-**Model download GUI didn’t appear**  
-- Re‑run **`setup_transcribe_offline.R`**; it will re‑validate content and prompt for models.
-
-**No audio playback**  
-- The app requires `sounddevice`/`soundfile` and a working audio device. Make sure Windows Output is not muted.
-
-**Alignment skipped**  
-- Alignment is **English only**. For other languages, diarisation still works at segment level.
-
-**High memory usage**  
-- Long files are supported, but memory use scales with duration. The app frees caches between **Transcribe → Align → Diarise** stages to stay within limits.
 
 ---
 
