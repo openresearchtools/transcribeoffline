@@ -1,19 +1,32 @@
-
 #!/usr/bin/env bash
 # setup_transcribe_offline_ubuntu.sh
 # Ubuntu x64 setup for "Transcribe Offline"
 #
-# - Requires system ffmpeg (we DO NOT auto-install; we show how)
-# - Ensures Python 3.11 + tkinter + venv (Tk/Venv first; Deadsnakes fallback)
-# - Creates ~/Downloads/Transcribe_Offline with a venv (robust to ensurepip bugs)
-# - Fetches main.py, models.py, icon, and licenses from GitHub (Linux folder)
-# - Installs pinned wheels (NO deps) + CPU-only torch/torchaudio from PyTorch index
-# - Hardens audio (libsndfile/portaudio) and ctranslate2 CPU path
-# - Unpacks llama.cpp Ubuntu x64 into content/vendor/llama.cpp
-# - Writes launchers (venv-bound) + .desktop files with icon
-# - Auto-launches Models Downloader at the end (background)
+# - Requires system ffmpeg (we DO NOT install it for you; we require it)
+# - Installs Python 3.11 *and* python3.11-tk and python3.11-venv (Ubuntu repos; Deadsnakes fallback)
+# - Creates ~/Downloads/Transcribe_Offline with a venv
+# - Installs pinned wheels (EXCLUDES torch/torchaudio at first)
+# - Installs CPU-only torch/torchaudio from PyTorch CPU index
+# - Hardens sound libs (libsndfile/portaudio)
+# - Hardens ctranslate2 (CPU-only wheel; fallback to 4.4.0 if needed)
+# - Downloads llama.cpp (Ubuntu x64) into content/vendor/llama.cpp
+# - Fetches main.py, models.py, AppIcon.png, and license files from GitHub
+# - Writes Desktop/menu/in-folder launchers with icon
+# - **Launches the Model Downloader GUI at the VERY END** (default ON; use --no-launch-models to skip)
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
+
+# ----- options -----
+LAUNCH_MODELS=1
+CREATE_SHORTCUTS=1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-launch-models) LAUNCH_MODELS=0 ;;
+    --no-shortcuts)     CREATE_SHORTCUTS=0 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 log()  { printf "[ %(%H:%M:%S)T ] %s\n" -1 "$*"; }
 halt() { printf "ERROR: %s\n" "$*" >&2; exit 1; }
@@ -23,7 +36,7 @@ halt() { printf "ERROR: %s\n" "$*" >&2; exit 1; }
 arch="$(uname -m)"
 [[ "$arch" == "x86_64" || "$arch" == "amd64" ]] || halt "This setup expects x86_64/amd64. Found: $arch"
 
-# ----- Resolve Downloads/Desktop dirs -----
+# ----- Resolve dirs -----
 if command -v xdg-user-dir >/dev/null 2>&1; then
   DL="$(xdg-user-dir DOWNLOAD || true)"; [[ -n "${DL:-}" ]] || DL="$HOME/Downloads"
   DESK="$(xdg-user-dir DESKTOP  || true)"; [[ -n "${DESK:-}" ]] || DESK="$HOME/Desktop"
@@ -42,7 +55,6 @@ LICENSES_DIR="$CONTENT_DIR/licenses"
 VENDOR_DIR="$CONTENT_DIR/vendor"
 LLAMA_DIR="$VENDOR_DIR/llama.cpp"
 MODELS_DIR="$CONTENT_DIR/models"
-
 mkdir -p "$PROJ_DIR" "$CONTENT_DIR" "$LICENSES_DIR" "$VENDOR_DIR" "$LLAMA_DIR" "$MODELS_DIR"
 log "Working in: $PROJ_DIR"
 cd "$PROJ_DIR"
@@ -53,19 +65,16 @@ export HUGGINGFACE_HUB_CACHE="$MODELS_DIR"
 export TRANSFORMERS_CACHE="$MODELS_DIR"
 
 # =====================================================================
-# 0) Fetch app files from GitHub (Linux folder)
+# 0) Fetch app files from GitHub (Linux folder) — NO execution here
 # =====================================================================
 RAW_BASE='https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Linux'
 
 ensure_downloader() {
-  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
-    return 0
-  fi
+  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then return 0; fi
   log "Installing 'curl' (sudo)…"
   sudo apt-get update -y
   sudo apt-get install -y curl
 }
-
 download_file() {  # url outpath mode[text|bin]
   local url="$1"; local out="$2"; local mode="${3:-bin}"
   mkdir -p "$(dirname "$out")"
@@ -78,7 +87,6 @@ download_file() {  # url outpath mode[text|bin]
   if [[ "$mode" == "text" ]]; then tr -d '\r' <"$tmp" >"${tmp}.t" && mv -f "${tmp}.t" "$tmp"; fi
   mv -f "$tmp" "$out"
 }
-
 fetch_if_missing() { # url outpath mode
   local url="$1"; local out="$2"; local mode="${3:-bin}"
   if [[ -s "$out" ]]; then
@@ -99,20 +107,15 @@ fetch_if_missing "$RAW_BASE/content/licenses/Third-Party-Licenses.txt" "$LICENSE
 [[ -s "$PROJ_DIR/main.py" ]] || halt "main.py missing after download."
 
 # =====================================================================
-# 1) FFmpeg check (do NOT auto-install; show how if missing)
+# 1) FFmpeg check (require it)
 # =====================================================================
 if ! command -v ffmpeg >/dev/null 2>&1; then
   cat <<'EOF'
 
 FFmpeg is not installed on this system. The app depends on the system's ffmpeg.
-We will NOT install it for you. Please install it, then re-run this setup.
+Please install it, then re-run this setup:
 
-Suggested commands (Ubuntu/Debian):
-  sudo apt-get update
-  sudo apt-get install -y ffmpeg
-
-After installing, re-run:
-  bash setup_transcribe_offline_ubuntu.sh
+  sudo apt-get update && sudo apt-get install -y ffmpeg
 
 EOF
   exit 1
@@ -120,14 +123,13 @@ fi
 log "FFmpeg found: $(command -v ffmpeg)"
 
 # =====================================================================
-# 2) Ensure Python 3.11 + tkinter + venv (Tk/Venv FIRST; Deadsnakes fallback)
+# 2) Ensure Python 3.11 + Tk + venv (Ubuntu repos first; Deadsnakes fallback)
 # =====================================================================
 PY311="python3.11"
-
 have_py311() { command -v python3.11 >/dev/null 2>&1; }
 
 install_tk_venv_via_apt() {
-  log "Installing python3.11-tk + python3.11-venv via Ubuntu repos (sudo)…"
+  log "Installing python3.11-tk + python3.11-venv (Ubuntu repos)…"
   set +e
   sudo apt-get update
   sudo apt-get install -y python3.11-tk python3.11-venv
@@ -135,45 +137,36 @@ install_tk_venv_via_apt() {
   set -e
   return $rc
 }
-
 install_tk_venv_via_deadsnakes() {
-  log "Adding Deadsnakes PPA for Python 3.11 Tk/Venv (sudo)…"
+  log "Adding Deadsnakes PPA for Python 3.11 Tk/Venv…"
   set +e
   sudo apt-get update
   sudo apt-get install -y software-properties-common
   sudo add-apt-repository -y ppa:deadsnakes/ppa
   sudo apt-get update
-  sudo apt-get install -y python3.11-tk python3.11-venv
+  sudo apt-get install -y python3.11 python3.11-tk python3.11-venv
   rc=$?
   set -e
   return $rc
 }
 
 ensure_py311_with_tk_venv() {
-  # Step A: install Tk & Venv first (this usually brings python3.11 in as dependency)
   if ! install_tk_venv_via_apt; then
     install_tk_venv_via_deadsnakes || true
   fi
-
-  # Step B: if interpreter still missing, install it explicitly.
   if ! have_py311; then
-    log "Installing base python3.11 (sudo)…"
-    set +e
+    log "Installing base python3.11…"
     sudo apt-get install -y python3.11 || true
-    set -e
   fi
-
-  # Step C: final Tk import check with 3.11; if it fails, try generic python3-tk as a last resort.
+  # Final Tk check
   if ! python3.11 - <<'PY' 2>/dev/null
 import tkinter as tk
 print("OK")
 PY
   then
-    log "Trying generic python3-tk as last resort (sudo)…"
+    log "Trying generic python3-tk as a last resort…"
     sudo apt-get install -y python3-tk || true
   fi
-
-  # Hard fail if Tk still not importable for 3.11.
   if ! python3.11 - <<'PY' 2>/dev/null
 import tkinter as tk
 print("OK")
@@ -184,16 +177,15 @@ PY
 }
 
 ensure_py311_with_tk_venv
-
 log "Checking Tkinter on base Python 3.11…"
 "$PY311" - <<'PY'
-import tkinter as tk  # noqa: F401
+import tkinter as tk
 print("OK")
 PY
 log "Tkinter OK on base."
 
 # =====================================================================
-# 3) Create local venv (robust) & install pinned wheels (NO torch/torchaudio here)
+# 3) Create venv (robust) & install pinned wheels (NO torch/torchaudio yet)
 # =====================================================================
 VENV_DIR="$PROJ_DIR/.venv"
 VENV_BIN="$VENV_DIR/bin"
@@ -209,6 +201,7 @@ if [[ ! -x "$VENV_PY" ]]; then
     log "venv creation hit ensurepip issue — retrying without pip, then bootstrapping…"
     "$PY311" -m venv --without-pip "$VENV_DIR"
     [[ -x "$VENV_PY" ]] || halt "Venv python missing after fallback."
+    ensure_downloader
     curl -fsSL -o "$PROJ_DIR/get-pip.py" https://bootstrap.pypa.io/get-pip.py
     "$VENV_PY" "$PROJ_DIR/get-pip.py"
     rm -f "$PROJ_DIR/get-pip.py"
@@ -308,7 +301,7 @@ HFWRAP
 fi
 
 # =====================================================================
-# 3a) CPU-only PyTorch/Torchaudio (no CUDA)
+# 3a) CPU-only PyTorch/Torchaudio
 # =====================================================================
 log "Installing CPU-only torch/torchaudio…"
 "$VENV_PY" -m pip uninstall -y torch torchaudio || true
@@ -329,7 +322,7 @@ assert not torch.cuda.is_available(), "CUDA build of torch installed; expected C
 PY
 
 # =====================================================================
-# 3b) HARDEN audio deps: ensure soundfile/sounddevice import OK
+# 3b) HARDEN audio deps
 # =====================================================================
 log "Verifying sound libs inside venv…"
 if ! "$VENV_PY" - <<'PY'
@@ -352,7 +345,7 @@ PY
 fi
 
 # =====================================================================
-# 3c) HARDEN faster-whisper/ctranslate2 runtime (force CPU wheel if needed)
+# 3c) HARDEN faster-whisper/ctranslate2 runtime
 # =====================================================================
 needs_fix=0
 if ! "$VENV_PY" - <<'PY'
@@ -452,7 +445,7 @@ fi
 log "llama.cpp OK."
 
 # =====================================================================
-# 5) Write launchers that ALWAYS use the venv (PATH + same Python)
+# 5) Write launchers (venv-bound). No launching until the very end.
 # =====================================================================
 RUN_MAIN="$PROJ_DIR/run_transcribe_offline.sh"
 RUN_MODELS="$PROJ_DIR/download_models.sh"
@@ -462,30 +455,17 @@ cat >"$RUN_MAIN" <<'SH'
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
-
-if [[ ! -x "$VENV_DIR/bin/python" ]]; then
-  echo "Project venv missing at $VENV_DIR. Re-run setup." >&2
-  exit 1
-fi
-
-# Use the SAME venv Python and make its tools first on PATH (includes 'hf')
+[[ -x "$VENV_DIR/bin/python" ]] || { echo "Missing venv at $VENV_DIR" >&2; exit 1; }
 export VIRTUAL_ENV="$VENV_DIR"
 export PATH="$VENV_DIR/bin:$SCRIPT_DIR/content/vendor/llama.cpp:$PATH"
 unset PYTHONHOME
-
-# Keep model caches in-project
 export HF_HOME="$SCRIPT_DIR/content/models"
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
 export TRANSFORMERS_CACHE="$HF_HOME"
-
-# Misc envs used by the app
 export TOKENIZERS_PARALLELISM=false
 export KMP_DUPLICATE_LIB_OK=TRUE
-# Ensure llama shared libs are discoverable if needed
 export LD_LIBRARY_PATH="$SCRIPT_DIR/content/vendor/llama.cpp:${LD_LIBRARY_PATH:-}"
-# Force CPU-only path for CT2 / Torch
 export CUDA_VISIBLE_DEVICES=""
-
 exec "$VENV_DIR/bin/python" -u "$SCRIPT_DIR/main.py" "$@"
 SH
 chmod +x "$RUN_MAIN"
@@ -495,25 +475,17 @@ cat >"$RUN_MODELS" <<'SH'
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
-
-if [[ ! -x "$VENV_DIR/bin/python" ]]; then
-  echo "Project venv missing at $VENV_DIR. Re-run setup." >&2
-  exit 1
-fi
-
+[[ -x "$VENV_DIR/bin/python" ]] || { echo "Missing venv at $VENV_DIR" >&2; exit 1; }
 export VIRTUAL_ENV="$VENV_DIR"
 export PATH="$VENV_DIR/bin:$SCRIPT_DIR/content/vendor/llama.cpp:$PATH"
 unset PYTHONHOME
-
 export HF_HOME="$SCRIPT_DIR/content/models"
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
 export TRANSFORMERS_CACHE="$HF_HOME"
-
 export TOKENIZERS_PARALLELISM=false
 export KMP_DUPLICATE_LIB_OK=TRUE
 export LD_LIBRARY_PATH="$SCRIPT_DIR/content/vendor/llama.cpp:${LD_LIBRARY_PATH:-}"
 export CUDA_VISIBLE_DEVICES=""
-
 exec "$VENV_DIR/bin/python" -u "$SCRIPT_DIR/models.py" "$@"
 SH
 chmod +x "$RUN_MODELS"
@@ -523,19 +495,16 @@ log "  $RUN_MAIN"
 log "  $RUN_MODELS"
 
 # =====================================================================
-# 6) Desktop/menu launchers with icon (double-click friendly)
+# 6) Desktop/menu launchers with icon (created only after success)
 # =====================================================================
-APP_ICON_PNG="$CONTENT_DIR/AppIcon.png"
-if [[ -f "$APP_ICON_PNG" ]]; then
-  APP_ICON="$APP_ICON_PNG"
-else
-  APP_ICON="utilities-terminal"  # fallback system icon
-fi
-STARTUP_WMCLASS="Tk"
+if [[ "$CREATE_SHORTCUTS" -eq 1 ]]; then
+  APP_ICON_PNG="$CONTENT_DIR/AppIcon.png"
+  if [[ -f "$APP_ICON_PNG" ]]; then APP_ICON="$APP_ICON_PNG"; else APP_ICON="utilities-terminal"; fi
+  STARTUP_WMCLASS="Tk"
 
-make_desktop() {
-  local name="$1" exec_path="$2" icon="$3" out="$4" wmclass="$5" workdir="$6"
-  cat >"$out" <<EOF
+  make_desktop() {
+    local name="$1" exec_path="$2" icon="$3" out="$4" wmclass="$5" workdir="$6"
+    cat >"$out" <<EOF
 [Desktop Entry]
 Type=Application
 Name=$name
@@ -550,55 +519,50 @@ StartupWMClass=$wmclass
 X-GNOME-UsesNotifications=false
 DBusActivatable=false
 EOF
-  chmod +x "$out"
-}
+    chmod +x "$out"
+  }
 
-DESK_MAIN="$DESK/Transcribe Offline.desktop"
-DESK_MODELS="$DESK/Download Models.desktop"
-make_desktop "Transcribe Offline" "$RUN_MAIN" "$APP_ICON" "$DESK_MAIN" "$STARTUP_WMCLASS" "$PROJ_DIR"
-make_desktop "Download Models" "$RUN_MODELS" "$APP_ICON" "$DESK_MODELS" "$STARTUP_WMCLASS" "$PROJ_DIR"
+  DESK_MAIN="$DESK/Transcribe Offline.desktop"
+  DESK_MODELS="$DESK/Download Models.desktop"
+  make_desktop "Transcribe Offline" "$RUN_MAIN" "$APP_ICON" "$DESK_MAIN" "$STARTUP_WMCLASS" "$PROJ_DIR"
+  make_desktop "Download Models" "$RUN_MODELS" "$APP_ICON" "$DESK_MODELS" "$STARTUP_WMCLASS" "$PROJ_DIR"
 
-APPS_DIR="$HOME/.local/share/applications"
-mkdir -p "$APPS_DIR"
-APP_MAIN_DESKTOP="$APPS_DIR/transcribe-offline.desktop"
-APP_MODELS_DESKTOP="$APPS_DIR/transcribe-offline-models.desktop"
-make_desktop "Transcribe Offline" "$RUN_MAIN" "$APP_ICON" "$APP_MAIN_DESKTOP" "$STARTUP_WMCLASS" "$PROJ_DIR"
-make_desktop "Download Models" "$RUN_MODELS" "$APP_ICON" "$APP_MODELS_DESKTOP" "$STARTUP_WMCLASS" "$PROJ_DIR"
+  APPS_DIR="$HOME/.local/share/applications"
+  mkdir -p "$APPS_DIR"
+  APP_MAIN_DESKTOP="$APPS_DIR/transcribe-offline.desktop"
+  APP_MODELS_DESKTOP="$APPS_DIR/transcribe-offline-models.desktop"
+  make_desktop "Transcribe Offline" "$RUN_MAIN" "$APP_ICON" "$APP_MAIN_DESKTOP" "$STARTUP_WMCLASS" "$PROJ_DIR"
+  make_desktop "Download Models" "$RUN_MODELS" "$APP_ICON" "$APP_MODELS_DESKTOP" "$STARTUP_WMCLASS" "$PROJ_DIR"
 
-IN_FOLDER_MAIN="$PROJ_DIR/Transcribe Offline.desktop"
-IN_FOLDER_MODELS="$PROJ_DIR/Download Models.desktop"
-make_desktop "Transcribe Offline" "$RUN_MAIN" "$APP_ICON" "$IN_FOLDER_MAIN" "$STARTUP_WMCLASS" "$PROJ_DIR"
-make_desktop "Download Models" "$RUN_MODELS" "$APP_ICON" "$IN_FOLDER_MODELS" "$STARTUP_WMCLASS" "$PROJ_DIR"
+  IN_FOLDER_MAIN="$PROJ_DIR/Transcribe Offline.desktop"
+  IN_FOLDER_MODELS="$PROJ_DIR/Download Models.desktop"
+  make_desktop "Transcribe Offline" "$RUN_MAIN" "$APP_ICON" "$IN_FOLDER_MAIN" "$STARTUP_WMCLASS" "$PROJ_DIR"
+  make_desktop "Download Models" "$RUN_MODELS" "$APP_ICON" "$IN_FOLDER_MODELS" "$STARTUP_WMCLASS" "$PROJ_DIR"
 
-command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS_DIR" || true
+  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS_DIR" || true
 
-if command -v gio >/dev/null 2>&1; then
-  gio set "$DESK_MAIN"        metadata::trusted true 2>/dev/null || true
-  gio set "$DESK_MODELS"      metadata::trusted true 2>/dev/null || true
-  gio set "$IN_FOLDER_MAIN"   metadata::trusted true 2>/dev/null || true
-  gio set "$IN_FOLDER_MODELS" metadata::trusted true 2>/dev/null || true
+  if command -v gio >/dev/null 2>&1; then
+    gio set "$DESK_MAIN"        metadata::trusted true 2>/dev/null || true
+    gio set "$DESK_MODELS"      metadata::trusted true 2>/dev/null || true
+    gio set "$IN_FOLDER_MAIN"   metadata::trusted true 2>/dev/null || true
+    gio set "$IN_FOLDER_MODELS" metadata::trusted true 2>/dev/null || true
+  fi
 fi
 
 # =====================================================================
-# 7) FINAL INFO + AUTO-LAUNCH MODELS DOWNLOADER (background)
+# 7) FINAL INFO + LAUNCH MODELS DOWNLOADER (LAST STEP, default ON)
 # =====================================================================
 echo
 log "DONE. Project: $PROJ_DIR"
 log "Venv Python:  $VENV_PY"
 echo
-echo "Launch from Desktop:"
-echo "  • Double-click 'Transcribe Offline' (you may need to right-click ▸ Allow Launching once)."
-echo "Or from terminal:"
+echo "Launch from Desktop (after allowing launching if needed), or from terminal:"
 echo "  \"$RUN_MAIN\""
-echo
-echo "Model downloader:"
-echo "  • Desktop icon 'Download Models' or:"
 echo "  \"$RUN_MODELS\""
 echo
 
-if [[ -f "$PROJ_DIR/models.py" ]]; then
-  log "Launching Models Downloader with venv…"
+if [[ "$LAUNCH_MODELS" -eq 1 && -f "$PROJ_DIR/models.py" ]]; then
+  log "Launching Models Downloader (LAST step)…"
   nohup "$RUN_MODELS" >/dev/null 2>&1 &
-else
-  log "models.py not found in $PROJ_DIR — skipping auto-launch."
 fi
+
