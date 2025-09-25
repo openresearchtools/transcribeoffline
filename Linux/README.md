@@ -35,7 +35,7 @@
     ```
     sudo apt-get update && sudo apt-get install -y ffmpeg
     ```
-2. Run the following command in Terminal.
+2. Run the following command in **Terminal**.
     ```
    bash -c 'set -e; URL="https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Linux/setup_transcribe_offline_ubuntu.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$URL" | bash; elif command -v wget >/dev/null 2>&1; then wget -qO- "$URL" | bash; else sudo apt-get update -y && sudo apt-get install -y curl && curl -fsSL "$URL" | bash; fi'
     ```
