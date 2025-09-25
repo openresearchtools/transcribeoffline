@@ -84,7 +84,8 @@ Researchers, lecturers, and professional practitioners who need dependable, loca
 ## Downloads & project links
 
 - **macOS project page:** <https://github.com/openresearchtools/transcribeoffline/tree/main/macOS>  
-- **Windows project page:** <https://github.com/openresearchtools/transcribeoffline/tree/main/Windows>  
+- **Windows project page:** <https://github.com/openresearchtools/transcribeoffline/tree/main/Windows>
+- **Ubuntu Linux project page:** <https://github.com/openresearchtools/transcribeoffline/tree/main/Linux> 
 
 > If you’re evaluating for institutional use, test with non‑sensitive audio first, then review logs/exports with your IT or data guardian.
 
