@@ -1,28 +1,22 @@
+
 #!/usr/bin/env bash
 # setup_transcribe_offline_ubuntu.sh
 # Ubuntu x64 setup for "Transcribe Offline"
 #
-# - Requires system ffmpeg (we DO NOT install it; we print how)
-# - Ensures Python 3.11 + tkinter + venv (sudo; Deadsnakes fallback)
-# - Creates ~/Downloads/Transcribe_Offline with a venv (robust even if ensurepip is disabled)
-# - Installs pinned wheels with --no-deps (EXCLUDES torch/torchaudio)
-# - Installs CPU-only torch/torchaudio from PyTorch CPU index
-# - Hardens sound libs (libsndfile/portaudio)
-# - Hardens ctranslate2 → CPU (fallback to 4.4.0 if needed)
+# - Requires system ffmpeg (we DO NOT auto-install; we show how)
+# - Ensures Python 3.11 + tkinter + venv (Tk/Venv first; Deadsnakes fallback)
+# - Creates ~/Downloads/Transcribe_Offline with a venv (robust to ensurepip bugs)
 # - Fetches main.py, models.py, icon, and licenses from GitHub (Linux folder)
-# - Extracts llama.cpp (Ubuntu x64) to content/vendor/llama.cpp
-# - Writes launchers that ALWAYS use the venv and CPU path
-# - Creates Desktop, in-folder, and app-menu launchers using content/AppIcon.png
-# - Auto-launches the Models Downloader at the end (background)
-
+# - Installs pinned wheels (NO deps) + CPU-only torch/torchaudio from PyTorch index
+# - Hardens audio (libsndfile/portaudio) and ctranslate2 CPU path
+# - Unpacks llama.cpp Ubuntu x64 into content/vendor/llama.cpp
+# - Writes launchers (venv-bound) + .desktop files with icon
+# - Auto-launches Models Downloader at the end (background)
 set -Eeuo pipefail
+export DEBIAN_FRONTEND=noninteractive
 
 log()  { printf "[ %(%H:%M:%S)T ] %s\n" -1 "$*"; }
 halt() { printf "ERROR: %s\n" "$*" >&2; exit 1; }
-
-export LANG=C.UTF-8
-export LC_ALL=C.UTF-8
-export PYTHONUTF8=1
 
 # ----- Preflight -----
 [[ "$(uname -s)" == "Linux" ]] || halt "This setup is for Linux only."
@@ -32,7 +26,7 @@ arch="$(uname -m)"
 # ----- Resolve Downloads/Desktop dirs -----
 if command -v xdg-user-dir >/dev/null 2>&1; then
   DL="$(xdg-user-dir DOWNLOAD || true)"; [[ -n "${DL:-}" ]] || DL="$HOME/Downloads"
-  DESK="$(xdg-user-dir DESKTOP || true)"; [[ -n "${DESK:-}" ]] || DESK="$HOME/Desktop"
+  DESK="$(xdg-user-dir DESKTOP  || true)"; [[ -n "${DESK:-}" ]] || DESK="$HOME/Desktop"
 else
   DL="$HOME/Downloads"
   DESK="$HOME/Desktop"
@@ -72,31 +66,23 @@ ensure_downloader() {
   sudo apt-get install -y curl
 }
 
-# download_file URL OUTPATH [mode:text|bin]
-download_file() {
+download_file() {  # url outpath mode[text|bin]
   local url="$1"; local out="$2"; local mode="${3:-bin}"
   mkdir -p "$(dirname "$out")"
   local tmp="$out.__tmp__"
   if command -v curl >/dev/null 2>&1; then
-    if ! curl -fsSL -o "$tmp" "$url"; then
-      rm -f "$tmp"; return 1
-    fi
+    curl -fsSL -o "$tmp" "$url" || { rm -f "$tmp"; return 1; }
   else
-    if ! wget -qO "$tmp" "$url"; then
-      rm -f "$tmp"; return 1
-    fi
+    wget -qO "$tmp" "$url"      || { rm -f "$tmp"; return 1; }
   fi
-  if [[ "$mode" == "text" ]]; then
-    tr -d '\r' < "$tmp" > "${tmp}.t" && mv -f "${tmp}.t" "$tmp"
-  fi
+  if [[ "$mode" == "text" ]]; then tr -d '\r' <"$tmp" >"${tmp}.t" && mv -f "${tmp}.t" "$tmp"; fi
   mv -f "$tmp" "$out"
-  return 0
 }
 
-fetch_if_missing() {
+fetch_if_missing() { # url outpath mode
   local url="$1"; local out="$2"; local mode="${3:-bin}"
   if [[ -s "$out" ]]; then
-    log "Exists: $(realpath --relative-to="$PROJ_DIR" "$out") — skipping download"
+    log "Exists: $(realpath --relative-to="$PROJ_DIR" "$out") — skipping"
     return 0
   fi
   log "Downloading: $url -> $out"
@@ -104,23 +90,16 @@ fetch_if_missing() {
 }
 
 ensure_downloader
-
-# Files to fetch
 fetch_if_missing "$RAW_BASE/main.py"                                   "$PROJ_DIR/main.py"                  text
 fetch_if_missing "$RAW_BASE/models.py"                                 "$PROJ_DIR/models.py"                text
 fetch_if_missing "$RAW_BASE/content/AppIcon.png"                       "$CONTENT_DIR/AppIcon.png"           bin
-# README filename may be MD or md on the repo; try both
-if ! download_file "$RAW_BASE/content/licenses/README.MD" "$LICENSES_DIR/README.MD" text; then
-  fetch_if_missing "$RAW_BASE/content/licenses/README.md"             "$LICENSES_DIR/README.MD"            text
-fi
 fetch_if_missing "$RAW_BASE/content/licenses/LICENSE.txt"              "$LICENSES_DIR/LICENSE.txt"          text
+fetch_if_missing "$RAW_BASE/content/licenses/README.MD"                "$LICENSES_DIR/README.MD"            text
 fetch_if_missing "$RAW_BASE/content/licenses/Third-Party-Licenses.txt" "$LICENSES_DIR/Third-Party-Licenses.txt" text
-
-# Validate main.py presence
 [[ -s "$PROJ_DIR/main.py" ]] || halt "main.py missing after download."
 
 # =====================================================================
-# 1) FFmpeg check (do NOT install; suggest command)
+# 1) FFmpeg check (do NOT auto-install; show how if missing)
 # =====================================================================
 if ! command -v ffmpeg >/dev/null 2>&1; then
   cat <<'EOF'
@@ -141,104 +120,106 @@ fi
 log "FFmpeg found: $(command -v ffmpeg)"
 
 # =====================================================================
-# 2) Ensure Python 3.11 + tkinter + venv (with Deadsnakes fallback)
+# 2) Ensure Python 3.11 + tkinter + venv (Tk/Venv FIRST; Deadsnakes fallback)
 # =====================================================================
-PY311=""
+PY311="python3.11"
 
 have_py311() { command -v python3.11 >/dev/null 2>&1; }
 
-install_py311_via_apt() {
-  log "Trying Ubuntu repos for Python 3.11 (sudo)…"
+install_tk_venv_via_apt() {
+  log "Installing python3.11-tk + python3.11-venv via Ubuntu repos (sudo)…"
   set +e
   sudo apt-get update
-  sudo apt-get install -y python3.11 python3.11-venv python3.11-tk
+  sudo apt-get install -y python3.11-tk python3.11-venv
   rc=$?
   set -e
   return $rc
 }
 
-install_py311_via_deadsnakes() {
-  log "Adding Deadsnakes PPA for Python 3.11 (sudo)…"
+install_tk_venv_via_deadsnakes() {
+  log "Adding Deadsnakes PPA for Python 3.11 Tk/Venv (sudo)…"
   set +e
   sudo apt-get update
   sudo apt-get install -y software-properties-common
   sudo add-apt-repository -y ppa:deadsnakes/ppa
   sudo apt-get update
-  sudo apt-get install -y python3.11 python3.11-venv python3.11-tk
+  sudo apt-get install -y python3.11-tk python3.11-venv
   rc=$?
   set -e
   return $rc
 }
 
-if have_py311; then
-  PY311="python3.11"
-else
-  if ! install_py311_via_apt; then
-    install_py311_via_deadsnakes || halt "Failed to install Python 3.11 via Deadsnakes."
+ensure_py311_with_tk_venv() {
+  # Step A: install Tk & Venv first (this usually brings python3.11 in as dependency)
+  if ! install_tk_venv_via_apt; then
+    install_tk_venv_via_deadsnakes || true
   fi
-  have_py311 || halt "Python 3.11 still not available after installation."
-  PY311="python3.11"
-fi
 
-# Tkinter check on base 3.11 (ensures python3.11-tk is present)
+  # Step B: if interpreter still missing, install it explicitly.
+  if ! have_py311; then
+    log "Installing base python3.11 (sudo)…"
+    set +e
+    sudo apt-get install -y python3.11 || true
+    set -e
+  fi
+
+  # Step C: final Tk import check with 3.11; if it fails, try generic python3-tk as a last resort.
+  if ! python3.11 - <<'PY' 2>/dev/null
+import tkinter as tk
+print("OK")
+PY
+  then
+    log "Trying generic python3-tk as last resort (sudo)…"
+    sudo apt-get install -y python3-tk || true
+  fi
+
+  # Hard fail if Tk still not importable for 3.11.
+  if ! python3.11 - <<'PY' 2>/dev/null
+import tkinter as tk
+print("OK")
+PY
+  then
+    halt "Tkinter not available in Python 3.11 after attempted installation."
+  fi
+}
+
+ensure_py311_with_tk_venv
+
 log "Checking Tkinter on base Python 3.11…"
-if ! "$PY311" - <<'PY'
+"$PY311" - <<'PY'
 import tkinter as tk  # noqa: F401
 print("OK")
 PY
-then
-  halt "Tkinter not available in Python 3.11. Ensure 'python3.11-tk' is installed."
-fi
 log "Tkinter OK on base."
 
 # =====================================================================
-# 3) Create local venv (robust even if ensurepip is stripped) & install deps
+# 3) Create local venv (robust) & install pinned wheels (NO torch/torchaudio here)
 # =====================================================================
 VENV_DIR="$PROJ_DIR/.venv"
-VENV_PY="$VENV_DIR/bin/python"
+VENV_BIN="$VENV_DIR/bin"
+VENV_PY="$VENV_BIN/python"
 
-create_venv_robust() {
-  if [[ -x "$VENV_PY" ]]; then
-    return 0
-  fi
+if [[ ! -x "$VENV_PY" ]]; then
   log "Creating virtual environment: $VENV_DIR"
   set +e
   "$PY311" -m venv "$VENV_DIR"
   rc=$?
   set -e
-  if [[ $rc -ne 0 ]]; then
-    log "venv creation failed (ensurepip error?). Retrying with --without-pip…"
-    "$PY311" -m venv --without-pip "$VENV_DIR" || halt "Failed to create venv (even without pip)."
+  if [[ $rc -ne 0 || ! -x "$VENV_PY" ]]; then
+    log "venv creation hit ensurepip issue — retrying without pip, then bootstrapping…"
+    "$PY311" -m venv --without-pip "$VENV_DIR"
+    [[ -x "$VENV_PY" ]] || halt "Venv python missing after fallback."
+    curl -fsSL -o "$PROJ_DIR/get-pip.py" https://bootstrap.pypa.io/get-pip.py
+    "$VENV_PY" "$PROJ_DIR/get-pip.py"
+    rm -f "$PROJ_DIR/get-pip.py"
   fi
-
-  # Ensure Python binary exists
-  [[ -x "$VENV_PY" ]] || halt "Venv Python missing at $VENV_PY"
-
-  # Ensure pip in venv (handle broken/disabled ensurepip)
-  if ! "$VENV_PY" -c 'import pip' >/dev/null 2>&1; then
-    log "Bootstrapping pip into venv…"
-    set +e
-    "$VENV_PY" -m ensurepip --upgrade --default-pip
-    pip_rc=$?
-    set -e
-    if [[ $pip_rc -ne 0 ]] || ! "$VENV_PY" -c 'import pip' >/dev/null 2>&1; then
-      log "ensurepip failed — using get-pip.py…"
-      GP="$PROJ_DIR/get-pip.py"
-      download_file "https://bootstrap.pypa.io/get-pip.py" "$GP" text || halt "Failed to download get-pip.py"
-      "$VENV_PY" "$GP"
-      rm -f "$GP"
-      "$VENV_PY" -c 'import pip' >/dev/null 2>&1 || halt "pip could not be installed in the venv."
-    fi
-  fi
-}
-
-create_venv_robust
+fi
+[[ -x "$VENV_PY" ]] || halt "Failed to create venv at $VENV_DIR"
 
 log "Upgrading pip/setuptools/wheel in venv…"
 "$VENV_PY" -m pip install --upgrade pip setuptools wheel
 
 REQ_FILE="$PROJ_DIR/requirements-pinned.txt"
-# IMPORTANT: torch and torchaudio are intentionally OMITTED here; we install CPU wheels later.
 cat >"$REQ_FILE" <<'REQS'
 asteroid-filterbanks==0.4.0
 av==15.1.0
@@ -301,10 +282,10 @@ tabulate==0.9.0
 tensorboardX==2.6.4
 threadpoolctl==3.6.0
 tokenizers==0.22.0
-# torch==2.8.0           <-- moved to CPU-only section
+# torch==2.8.0           <-- installed later (CPU index)
 torch-audiomentations==0.12.0
 torch-pitch-shift==1.2.5
-# torchaudio==2.8.0      <-- moved to CPU-only section
+# torchaudio==2.8.0      <-- installed later (CPU index)
 torchmetrics==1.8.2
 tqdm==4.67.1
 transformers==4.56.1
@@ -317,17 +298,17 @@ log "Installing pinned wheels into venv (pip --no-deps)…"
 "$VENV_PY" -m pip install --no-deps -r "$REQ_FILE"
 
 # Provide 'hf' shim if only 'huggingface-cli' exists
-if [[ ! -x "$VENV_DIR/bin/hf" && -x "$VENV_DIR/bin/huggingface-cli" ]]; then
+if [[ ! -x "$VENV_BIN/hf" && -x "$VENV_BIN/huggingface-cli" ]]; then
   log "Creating 'hf' shim in venv…"
-  cat >"$VENV_DIR/bin/hf" <<'HFWRAP'
+  cat >"$VENV_BIN/hf" <<'HFWRAP'
 #!/usr/bin/env bash
 exec "$(dirname "$0")/huggingface-cli" "$@"
 HFWRAP
-  chmod +x "$VENV_DIR/bin/hf"
+  chmod +x "$VENV_BIN/hf"
 fi
 
 # =====================================================================
-# 3a) Install CPU-only PyTorch & Torchaudio FIRST (no CUDA)
+# 3a) CPU-only PyTorch/Torchaudio (no CUDA)
 # =====================================================================
 log "Installing CPU-only torch/torchaudio…"
 "$VENV_PY" -m pip uninstall -y torch torchaudio || true
@@ -341,7 +322,6 @@ if [[ $rc -ne 0 ]]; then
   "$VENV_PY" -m pip install --no-deps --index-url https://download.pytorch.org/whl/cpu "torch==2.4.1" "torchaudio==2.4.1"
 fi
 
-# Verify CPU-only Torch
 "$VENV_PY" - <<'PY'
 import torch
 print("TORCH", torch.__version__, "cuda_available", torch.cuda.is_available())
@@ -399,7 +379,6 @@ if [[ "$needs_fix" == "1" ]]; then
   "$VENV_PY" -m pip uninstall -y ctranslate2 || true
   "$VENV_PY" -m pip install --no-deps --only-binary=:all: "ctranslate2==4.6.0"
 
-  # Re-check import; if still failing, fall back to 4.4.0 CPU wheel
   if ! "$VENV_PY" - <<'PY'
 try:
     import faster_whisper  # noqa: F401
@@ -413,7 +392,6 @@ PY
     log "CPU wheel 4.6.0 still failed — falling back to 4.4.0 (CPU)…"
     "$VENV_PY" -m pip uninstall -y ctranslate2 || true
     "$VENV_PY" -m pip install --no-deps --only-binary=:all: "ctranslate2==4.4.0"
-
     "$VENV_PY" - <<'PY'
 import faster_whisper
 print("OK (CT2=4.4.0)")
@@ -523,12 +501,10 @@ if [[ ! -x "$VENV_DIR/bin/python" ]]; then
   exit 1
 fi
 
-# Use the SAME venv Python and make its tools first on PATH (includes 'hf')
 export VIRTUAL_ENV="$VENV_DIR"
 export PATH="$VENV_DIR/bin:$SCRIPT_DIR/content/vendor/llama.cpp:$PATH"
 unset PYTHONHOME
 
-# Keep model caches in-project
 export HF_HOME="$SCRIPT_DIR/content/models"
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
 export TRANSFORMERS_CACHE="$HF_HOME"
@@ -555,8 +531,6 @@ if [[ -f "$APP_ICON_PNG" ]]; then
 else
   APP_ICON="utilities-terminal"  # fallback system icon
 fi
-
-# We use Tk's default WM class ("Tk").
 STARTUP_WMCLASS="Tk"
 
 make_desktop() {
@@ -579,13 +553,11 @@ EOF
   chmod +x "$out"
 }
 
-# Desktop entries (may need right-click ▸ Allow Launching once)
 DESK_MAIN="$DESK/Transcribe Offline.desktop"
 DESK_MODELS="$DESK/Download Models.desktop"
 make_desktop "Transcribe Offline" "$RUN_MAIN" "$APP_ICON" "$DESK_MAIN" "$STARTUP_WMCLASS" "$PROJ_DIR"
 make_desktop "Download Models" "$RUN_MODELS" "$APP_ICON" "$DESK_MODELS" "$STARTUP_WMCLASS" "$PROJ_DIR"
 
-# App menu entries
 APPS_DIR="$HOME/.local/share/applications"
 mkdir -p "$APPS_DIR"
 APP_MAIN_DESKTOP="$APPS_DIR/transcribe-offline.desktop"
@@ -593,21 +565,18 @@ APP_MODELS_DESKTOP="$APPS_DIR/transcribe-offline-models.desktop"
 make_desktop "Transcribe Offline" "$RUN_MAIN" "$APP_ICON" "$APP_MAIN_DESKTOP" "$STARTUP_WMCLASS" "$PROJ_DIR"
 make_desktop "Download Models" "$RUN_MODELS" "$APP_ICON" "$APP_MODELS_DESKTOP" "$STARTUP_WMCLASS" "$PROJ_DIR"
 
-# In-folder launchers (with icons)
 IN_FOLDER_MAIN="$PROJ_DIR/Transcribe Offline.desktop"
 IN_FOLDER_MODELS="$PROJ_DIR/Download Models.desktop"
 make_desktop "Transcribe Offline" "$RUN_MAIN" "$APP_ICON" "$IN_FOLDER_MAIN" "$STARTUP_WMCLASS" "$PROJ_DIR"
 make_desktop "Download Models" "$RUN_MODELS" "$APP_ICON" "$IN_FOLDER_MODELS" "$STARTUP_WMCLASS" "$PROJ_DIR"
 
-# Refresh desktop DB (best effort)
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS_DIR" || true
 
-# Mark as trusted so GNOME doesn’t warn (best effort)
 if command -v gio >/dev/null 2>&1; then
-  gio set "$DESK_MAIN"          metadata::trusted true 2>/dev/null || true
-  gio set "$DESK_MODELS"        metadata::trusted true 2>/dev/null || true
-  gio set "$IN_FOLDER_MAIN"     metadata::trusted true 2>/dev/null || true
-  gio set "$IN_FOLDER_MODELS"   metadata::trusted true 2>/dev/null || true
+  gio set "$DESK_MAIN"        metadata::trusted true 2>/dev/null || true
+  gio set "$DESK_MODELS"      metadata::trusted true 2>/dev/null || true
+  gio set "$IN_FOLDER_MAIN"   metadata::trusted true 2>/dev/null || true
+  gio set "$IN_FOLDER_MODELS" metadata::trusted true 2>/dev/null || true
 fi
 
 # =====================================================================
@@ -627,7 +596,6 @@ echo "  • Desktop icon 'Download Models' or:"
 echo "  \"$RUN_MODELS\""
 echo
 
-# Auto-open the Model Downloader now (background) if models.py is present
 if [[ -f "$PROJ_DIR/models.py" ]]; then
   log "Launching Models Downloader with venv…"
   nohup "$RUN_MODELS" >/dev/null 2>&1 &
