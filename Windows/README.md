@@ -117,26 +117,6 @@ source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'
 
 ---
 
-## Troubleshooting
-
-**The app didn’t start from RStudio**  
-- Ensure you ran **`setup_transcribe_offline.R`** to completion.  
-- Set working directory to **`Transcribe_Offline`** and run **`run_transcribe_offline.R`** again.  
-
-**Model download GUI didn’t appear**  
-- Re‑run **`setup_transcribe_offline.R`**; it will re‑validate content and prompt for models.
-
-**No audio playback**  
-- The app requires `sounddevice`/`soundfile` and a working audio device. Make sure Windows Output is not muted.
-
-**Alignment skipped**  
-- Alignment is **English only**. For other languages, diarisation still works at segment level.
-
-**High memory usage**  
-- Long files are supported, but memory use scales with duration. The app frees caches between **Transcribe → Align → Diarise** stages to stay within limits.
-
----
-
 ***Disclaimer & Licence***
 
 Transcribe Offline is open-source software distributed under the MIT Licence. A copy of the Licence is included with the project and is named Licence.
