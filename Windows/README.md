@@ -110,8 +110,8 @@ source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'
 
 - **Windows 10/11 64‑bit**  
 - **RStudio (Windows x64)** installed  
-- **16GB RAM***
-- **10GB Disk Space***
+- **16GB RAM**
+- **10GB Disk Space**
 - CPU with multiple cores recommended for faster processing  
 - Audio output device (for in‑app playback)
 
