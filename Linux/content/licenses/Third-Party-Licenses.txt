@@ -84,10 +84,7 @@ Qwen/Qwen3-4B-GGUF (4-bit)   —            Apache-2.0 (original Qwen3); GGUF qu
 
 Third-Party Notice: This application uses external non-Python executables at runtime.
 
-FFmpeg:
-• Upstream project: https://ffmpeg.org
-• Source for corresponding binaries: BtbN auto-builds (LGPL shared): https://github.com/BtbN/FFmpeg-Builds/releases ; https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2025-07-31-14-15/ffmpeg-N-120424-g03b9180fe3-win64-lgpl-shared.zip
-• License: GNU Lesser General Public License v2.1 
-
 llama.cpp binary (Windows CPU x64): https://github.com/ggml-org/llama.cpp/releases
 License: MIT (llama.cpp)
+
+FFmpeg:Not shipped with the app, but users are prompted to install on their system themselves.
