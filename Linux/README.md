@@ -83,8 +83,8 @@ By default, script checks if you have **Python 3.11-Tk** (Important part is TK, 
 ## System requirements (minimum)
 
 - **Ubuntu based 64‑bit system** 
-- **16GB RAM***
-- **10GB Disk Space***
+- **16GB RAM**
+- **10GB Disk Space**
 - CPU with multiple cores recommended for faster processing  
 - Audio output device (for in‑app playback)
 
