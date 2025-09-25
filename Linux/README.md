@@ -27,7 +27,6 @@
 - **Default model reference:** Qwen3 4‑bit
 
 ---
-## Run via Python 3.11-Tk (Important part is TK, as default Python does not ship Tkinter on Linux)
 
 ### One‑time setup
 
