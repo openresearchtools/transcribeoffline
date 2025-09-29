@@ -71,7 +71,7 @@ Paste and run this in R studio console if your Windows system does not use **One
 ```
 source(file.path('~','Downloads','Transcribe_Offline','run_transcribe_offline.R'))
 ```
-**OR** this if your system uses **OneDrive** (OneDrive systems manage it's folders slighly different and can lead to Documents/Downloads folder instead of Downloads if not set specifically.) 
+**OR** this if your system uses **OneDrive** (OneDrive systems manage their folders slighly different and can lead to Documents/Downloads folder instead of Downloads if not set specifically.) 
 ```
 source({d<-c(Sys.getenv("USERPROFILE"),Sys.getenv("OneDrive"),path.expand("~")); d<-d[nzchar(d)]; x<-file.path(d,"Downloads","Transcribe_Offline","run_transcribe_offline.R"); y<-x[file.exists(x)]; if(length(y)) y[1] else x[1]})
 ```
@@ -122,7 +122,7 @@ source({d<-c(Sys.getenv("USERPROFILE"),Sys.getenv("OneDrive"),path.expand("~"));
 ---
 
 ### Note! 
-**If you work on managed system, and it does not allow Microsoft Visual C++ Redistributable OR blocks llama.cpp binaries, it the chatting to your transcript functions such as summarising the transcript will not work, however transcribtion and diarisation should still work, as they are native Python Packages.**
+**If you work on managed system, and it does not allow Microsoft Visual C++ Redistributable OR blocks llama.cpp binaries, chatting to your transcript functions such as summarising the transcript will not work, however transcribtion and diarisation should still work, as they are native Python Packages.**
 
 ---
 
