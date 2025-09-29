@@ -90,6 +90,25 @@ By default, script checks if you have **Python 3.11-Tk** (Important part is TK, 
 
 ---
 
+## How to cite
+
+**Suggested citation**  
+Rutkauskas, L. (2025). *Transcribe Offline* (Version 1.2) [Computer software]. openresearchtools.com. https://github.com/openresearchtools/transcribeoffline. MIT Licence. Released 25 September 2025.
+
+**BibTeX**
+```bibtex
+@software{Rutkauskas_TranscribeOffline_2025,
+  author    = {Rutkauskas, L.},
+  title     = {Transcribe Offline},
+  version   = {1.2},
+  date      = {2025-09-25},
+  url       = {https://github.com/openresearchtools/transcribeoffline},
+  publisher = {openresearchtools.com},
+  license   = {MIT}
+}
+```
+---
+
 ***Disclaimer & Licence***
 
 Transcribe Offline is open-source software distributed under the MIT Licence. A copy of the Licence is included with the project and is named Licence.
