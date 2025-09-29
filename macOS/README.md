@@ -119,7 +119,7 @@ Rutkauskas, L. (2025). *Transcribe Offline* (Version 1.2) [Computer software]. o
   publisher = {openresearchtools.com},
   license   = {MIT}
 }
-
+```
 ---
 
 ## Disclaimer & Licence
