@@ -20,7 +20,14 @@ we would recommend setting up additional firewall or using on the machines with 
 * [llama.cpp](https://github.com/ggml-org/llama.cpp) — CPU‑only binaries used to run local models
 * Default model reference: **Qwen3 4‑bit**
 
+---
 
+## How to cite
+
+**Suggested citation**  
+Rutkauskas, L. (2025). *Transcribe Offline* (Version 1.2) [Computer software]. openresearchtools.com. https://github.com/openresearchtools/transcribeoffline. MIT Licence. Released 25 September 2025.
+
+---
 
 ***Disclaimer & Licence***
 
