@@ -122,6 +122,25 @@ Released under the **MIT Licence**. Third‑party models and tools are subject t
 
 ---
 
+## How to cite
+
+**Suggested citation**  
+Rutkauskas, L. (2025). *Transcribe Offline* (Version 1.2) [Computer software]. openresearchtools.com. https://github.com/openresearchtools/transcribeoffline. MIT Licence. Released 25 September 2025.
+
+**BibTeX**
+```bibtex
+@software{Rutkauskas_TranscribeOffline_2025,
+  author    = {Rutkauskas, L.},
+  title     = {Transcribe Offline},
+  version   = {1.2},
+  date      = {2025-09-25},
+  url       = {https://github.com/openresearchtools/transcribeoffline},
+  publisher = {openresearchtools.com},
+  license   = {MIT}
+}
+```
+---
+
 <p align="center">
   <sub>Built as an open tool for research and teaching. Stars, issues, and community examples are very welcome.</sub>
 </p>
