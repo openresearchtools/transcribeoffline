@@ -18,6 +18,8 @@
 These in turn depend on other packages and libraries. All dependencies are included in the 
 PyInstaller build and distributed with the application.
 
+---
+
 ## How to cite
 
 **Suggested citation**  
