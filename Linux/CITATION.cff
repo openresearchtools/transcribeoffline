@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: Rutkauskas
+    given-names: L.
+title: Transcribe Offline
+version: 1.2
+doi:
+date-released: 2025-09-25
+url: "https://github.com/openresearchtools/transcribeoffline"
+publisher: openresearchtools.com
