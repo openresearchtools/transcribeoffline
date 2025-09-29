@@ -122,7 +122,7 @@ source({d<-c(Sys.getenv("USERPROFILE"),Sys.getenv("OneDrive"),path.expand("~"));
 ---
 
 ### Note! 
-**If you work on managed system, and it does not allow Microsoft Visual C++ Redistributable OR blocks llama.cpp binaries, chatting to your transcript functions such as summarising the transcript will not work, however transcribtion and diarisation should still work, as they are native Python Packages.**
+**If you work on a managed system, and it does not allow Microsoft Visual C++ Redistributable OR blocks llama.cpp binaries, chatting to your transcript functions such as summarising the transcript will not work, however transcribtion and diarisation should still work, as they are native Python Packages.**
 
 ---
 
