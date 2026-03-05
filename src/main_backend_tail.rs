@@ -24,8 +24,6 @@ where
         .unwrap_or_else(|| PathBuf::from("."));
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir '{}'", output_dir.display()))?;
-    let engine_work_dir = output_dir.join(".engine_work");
-    let _ = fs::create_dir_all(&engine_work_dir);
 
     let mode_norm = settings.mode.trim().to_ascii_lowercase();
     let mut custom_value = settings.custom_mode.trim().to_string();
@@ -75,7 +73,6 @@ where
         "output_dir": output_dir.display().to_string(),
         "audio_source_path": audio_path.display().to_string(),
         "whisper_model": settings.whisper_model,
-        "work_dir": engine_work_dir.display().to_string(),
     });
     let selected_gpu = selected_gpu_index_from_settings(&settings);
 
@@ -139,8 +136,7 @@ where
         progress("running whisper transcription".to_string());
     }
     let bridge_started = Instant::now();
-    let response_json = api
-        .run_audio_raw(
+    let response_json = api.run_audio_raw(
         &shared,
         &AudioRunParams {
             audio_bytes,
@@ -148,13 +144,7 @@ where
             metadata_json: metadata,
             ffmpeg_convert: true,
         },
-    )
-        .with_context(|| {
-            format!(
-                "bridge audio route failed (engine work_dir='{}')",
-                engine_work_dir.display()
-            )
-        })?;
+    )?;
     progress("bridge pipeline stage: complete".to_string());
     let timing_bridge_ms = bridge_started.elapsed().as_millis();
 
