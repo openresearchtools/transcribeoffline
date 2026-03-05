@@ -373,8 +373,8 @@ jobs:
           cat > release-body.md <<EOF
           ## Downloads
 
-          - Windows x64: [\`${win_asset}\`](${win_url})
-          - macOS arm64: [\`${mac_asset}\`](${mac_url})
+          - Windows x64*: [\`${win_asset}\`](${win_url})
+          - macOS arm64*: [\`${mac_asset}\`](${mac_url})
           - Ubuntu x64 (.deb): [\`${linux_asset}\`](${linux_url})
           - Checksums: [\`${sums_asset}\`](${sums_url})
 
@@ -389,11 +389,37 @@ jobs:
           sudo apt install -y /tmp/${linux_asset}
           \`\`\`
 
-          ## Platform Notes
+          ## Unsigned Build Notice
 
-          - Windows: standalone \`.exe\` (unsigned).
-          - macOS: drag the app from the \`.dmg\` to Applications.
-          - Linux: \`.deb\` package installs launcher and desktop entry.
+          This app is an open-source hobby development effort by the repository owner. We do not currently have funding for full paid code-signing and notarization pipelines across all platforms/releases.
+
+          Because of that, operating-system protections or hardened security environments (for example Windows SmartScreen, enterprise endpoint controls, or macOS Gatekeeper policies) may block unsigned binaries.
+
+          If your environment blocks unsigned binaries, the recommended path is:
+          1. Build this desktop app from source on the target device.
+          2. Build Openresearchtools-Engine from source on the same target device.
+          3. Use those locally-built artifacts in your deployment.
+
+          ### Windows (when blocked)
+
+          If SmartScreen shows "Windows protected your PC", use More info -> Run anyway only if your policy allows it.
+
+          In the app, go to Settings -> Runtime Setup and run:
+          1. Download/Repair runtime
+          2. Unblock unsigned runtime
+          3. Recheck
+
+          The Windows unblock script clears Mark-of-the-Web flags in the selected runtime directory by running \`Unblock-File\` recursively on runtime files.
+
+          ### macOS (when blocked)
+
+          Try Right click -> Open on first launch.
+
+          If blocked by Gatekeeper, use System Settings -> Privacy & Security -> Open Anyway when available and policy permits.
+
+          In the app, after runtime install/repair, click Unblock unsigned runtime then Recheck.
+
+          The macOS unblock script removes quarantine attributes recursively (\`xattr -dr com.apple.quarantine\`) and restores executable bits for runtime binaries/scripts where needed (\`chmod +x\` on relevant files).
           EOF
 
       - name: Publish GitHub release assets
@@ -404,4 +430,4 @@ jobs:
           prerelease: ${{ inputs.prerelease == true }}
           files: release-assets/*
           body_path: release-body.md
-          generate_release_notes: true
+          generate_release_notes: false
