@@ -697,7 +697,7 @@ impl AnonymiseEntityKind {
     fn prompt_guidance(self) -> &'static str {
         match self {
             Self::Name => {
-                "Person names, initials, nicknames, and speaker names that identify a person."
+                "Person names, initials, nicknames, and speaker names that identify a person. Ignore structural transcript labels/tokens (for example, SPEAKER_<number> tags and timing headers)."
             }
             Self::Location => {
                 "Any geographic/location reference: countries, regions, provinces/states, cities, villages, districts, streets, landmarks, venues, sites, departments, buildings."
@@ -5551,19 +5551,23 @@ fn build_anonymise_prompt(source_text: &str, selected_kinds: &[AnonymiseEntityKi
          description: >\n\
            Extract selected anonymisation entities from transcript text and return one strict pseudo-JSON string.\n\
          system_prompt: |\n\
-           You are a meticulous anonymisation extraction assistant.\n\
-           Work strictly from the supplied transcript text.\n\
-           Return exactly one pseudo-JSON string only.\n\
-           Never include commentary, code fences, or <think> sections.\n\
-           Never invent values.\n\
-           Copy matched values letter-by-letter from the transcript.\n\
-         format_instructions: |\n\
+            You are a meticulous anonymisation extraction assistant.\n\
+            Work strictly from the supplied transcript text.\n\
+            Ignore transcript metadata labels and timing markers themselves (for example, SPEAKER_<number>, turn headers, and [hh:mm:ss - hh:mm:ss] ranges).\n\
+            Important: ignore only those labels/markers, not the spoken content that follows them.\n\
+            Return exactly one pseudo-JSON string only.\n\
+            Never include commentary, code fences, or <think> sections.\n\
+            Never invent values.\n\
+            Copy matched values letter-by-letter from the transcript.\n\
+          format_instructions: |\n\
            Output rules (strict):\n\
              - Respond with ONE line in this exact shape: `{{key: value; key: value;}}`\n\
              - Use outer braces exactly once.\n\
              - Allowed keys are only: {selected_keys}\n\
              - Repeat the key for every single match.\n\
              - Copy each value letter-by-letter from transcript.\n\
+             - Never extract transcript labels/metadata tokens themselves (SPEAKER_<number>, turn labels, timing brackets).\n\
+             - Still extract entities from the actual spoken text within those turns.\n\
              - Never output placeholders/tokens from examples (anything inside `<...>`).\n\
              - If nothing matched, return exactly: {selected_empty_response}\n\
              - Do not output quoted keys, arrays, or wrapper keys.\n\

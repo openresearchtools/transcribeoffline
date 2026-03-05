@@ -31,6 +31,11 @@ speaker rename tools, and anonymisation pass tooling.
 ### 4) Local LLM helpers
 Uses the engine bridge chat path with local GGUF models for transcript Q&A and
 anonymisation extraction.
+For chat/anonymisation, you can use any `llama.cpp`-compatible GGUF model;
+instruction-following chat models are recommended.
+
+Anonymisation is a **beta** function. For real-world use, always manually review
+the output transcript to confirm no unintended sensitive data remains.
 
 > Designed to be local‑first. However, no software can guarantee absolute privacy or security. Please consider your threat model and institutional policies before processing sensitive material.
 
@@ -114,6 +119,15 @@ If your environment blocks unsigned binaries, the recommended path is:
   media decoding/normalization path used by Openresearchtools-Engine runtime for audio conversion.
 - [`Symphonia`](https://github.com/pdeljanov/Symphonia):
   Rust audio decoding stack used by this desktop app for local playback.
+
+## Model acknowledgements (upstream model repos)
+
+- [`ggerganov/whisper.cpp`](https://github.com/ggml-org/whisper.cpp) and [`ggerganov/whisper.cpp` models on Hugging Face](https://huggingface.co/ggerganov/whisper.cpp):
+  upstream Whisper model family and GGML/GGUF model distribution source used by runtime transcription workflows.
+- [`openresearchtools/speaker-diarization-community-1-GGUF`](https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF):
+  diarization model-pack repository used by the engine diarization path in this app.
+- [`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1):
+  upstream diarization pipeline lineage referenced by the OpenResearchTools conversion path.
 
 ## Non-endorsement statement
 
