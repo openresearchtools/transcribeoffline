@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Transcribe Offline"
+type: software
+version: "2.0.0"
+date-released: "2026-03-04"
+license: "MIT"
+authors:
+  - family-names: "Rutkauskas"
+    given-names: "L."
+repository-code: "https://github.com/openresearchtools/transcribeoffline"
+url: "https://github.com/openresearchtools/transcribeoffline"
+preferred-citation:
+  type: software
+  authors:
+    - family-names: "Rutkauskas"
+      given-names: "L."
+  title: "Transcribe Offline"
+  version: "2.0.0"
+  date-released: "2026-03-04"
+  url: "https://github.com/openresearchtools/transcribeoffline"
+  publisher:
+    name: "OpenResearchTools"

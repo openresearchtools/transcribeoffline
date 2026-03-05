@@ -1,0 +1,40 @@
+# Rust build outputs
+/artifacts/
+/target/
+/target-wgpu-crisp/
+/target-fix-crisp/
+/target-fix-crisp-2/
+/dist/
+
+# Local runtime / artifacts
+/engine/
+/smoke-out/
+/transcribeoffline-main/
+/ui/
+/latest-build.txt
+/build-errors.txt
+
+# Temporary downloads and generated files
+*.download
+*.tmp
+*.log
+*.cache
+*.bak
+
+# Binary artifacts
+*.exe
+*.dll
+*.pdb
+*.so
+*.dylib
+
+# Local media/test fixtures
+interview-short.*
+debug-ui-check*.png
+assets/demo/*.mp3
+
+# IDE/system
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

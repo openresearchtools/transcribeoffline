@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "project": "Openresearchtools-Engine",
+  "repository": "openresearchtools/engine",
+  "tag": "v1.5",
+  "generated_at": "2026-03-04T23:12:08Z",
+  "release_url": "https://github.com/openresearchtools/engine/releases/tag/v1.5",
+  "assets": [
+    {
+      "id": "windows-x64-vulkan",
+      "platform": "windows-x64",
+      "backend": "vulkan",
+      "archive": "zip",
+      "file_name": "Openresearchtools-Engine-v1.5-windows-x64-vulkan.zip",
+      "url": "https://github.com/openresearchtools/engine/releases/download/v1.5/Openresearchtools-Engine-v1.5-windows-x64-vulkan.zip",
+      "sha256": "6afcc9be6394a7b5244d2614f7e6ce1faf36fd586c86d24ff2ad932d737d3c20"
+    },
+    {
+      "id": "macos-arm64-metal",
+      "platform": "macos-arm64",
+      "backend": "metal",
+      "archive": "zip",
+      "file_name": "Openresearchtools-Engine-v1.5-macos-arm64-metal.zip",
+      "url": "https://github.com/openresearchtools/engine/releases/download/v1.5/Openresearchtools-Engine-v1.5-macos-arm64-metal.zip",
+      "sha256": "d8609bafdc8de0e6c056c835672931687b2122857c2c33aee7714a821f741beb"
+    },
+    {
+      "id": "ubuntu-x64-vulkan",
+      "platform": "ubuntu-x64",
+      "backend": "vulkan",
+      "archive": "tar.gz",
+      "file_name": "Openresearchtools-Engine-v1.5-ubuntu-x64-vulkan.tar.gz",
+      "url": "https://github.com/openresearchtools/engine/releases/download/v1.5/Openresearchtools-Engine-v1.5-ubuntu-x64-vulkan.tar.gz",
+      "sha256": "cd3db835350f192210fa710b0a51a7507691f0146e9507cbdbee14d81ea607a2"
+    },
+    {
+      "id": "windows-x64-cuda",
+      "platform": "windows-x64",
+      "backend": "cuda",
+      "archive": "zip",
+      "file_name": "Openresearchtools-Engine-v1.5-windows-x64-cuda.zip",
+      "url": "https://github.com/openresearchtools/engine/releases/download/v1.5/Openresearchtools-Engine-v1.5-windows-x64-cuda.zip",
+      "sha256": "4348f9cbcb237b5c2a17645bbbb4af5e72b8d8ca1c82fb42d165728f0774a022"
+    }
+  ]
+}
