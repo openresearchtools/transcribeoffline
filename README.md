@@ -1,4 +1,4 @@
-# Transcribe Offline (Rust + egui)
+# Transcribe Offline
 
 ![Transcribe Offline Demo](Demo.png)
 
