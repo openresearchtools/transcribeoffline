@@ -152,37 +152,14 @@ Read these files in this repo:
 - Consolidated notice page (app + models + engine): `licenses/THIRD_PARTY_NOTICES_ALL.md`
 - Full app third-party licenses (full text per package): `licenses/APP_THIRD_PARTY_LICENSES_FULL.md`
 - Full engine third-party licenses (full text per package/file): `licenses/ENGINE_THIRD_PARTY_LICENSES_FULL.md`
-- Key licenses (high-level): `licenses/KEY_LICENSES.md`
-- Third-party notices: `licenses/THIRD_PARTY_NOTICES.md`
-- Model notices + citations: `licenses/MODEL_NOTICES_AND_CITATIONS.md`
-- Engine third-party notices: `licenses/ENGINE_THIRD_PARTY_NOTICES.md`
-- Engine third-party license summary: `licenses/ENGINE_THIRD_PARTY_LICENSES.md`
-- Full Rust dependency inventory: `licenses/RUST_DEPENDENCIES_FULL.md`
-- Generated crate license sources: `licenses/upstream/rust-crates/*`
-- License regeneration script: `scripts/regenerate-licenses.ps1`
-- Archived pre-rebase snapshot: `legacy-licenses/*`
-
-In-app legal viewer:
 - `Help -> Notices`
 - `Help -> App licenses`
 - `Help -> Engine licenses`
 
-Engine runtime notices (installed or bundled runtime):
-
-- `<runtime_dir>/licenses/THIRD_PARTY_NOTICES.md`
-- `<runtime_dir>/licenses/LICENSES.txt` (selected key-license bundle)
-- `<runtime_dir>/licenses/third_party/*`
-- `<runtime_dir>/licenses/rust-full/*`
-- `<runtime_dir>/vendor/ffmpeg/*` (LGPL + provenance text)
-- `<runtime_dir>/vendor/pdfium/*` (PDFium license texts)
-
-`<runtime_dir>` is:
-- by default: user-data `engine` directory
-  (resolved as `%APPDATA%\\OpenResearchTools\\engine` unless overridden).
 
 ## Models and conversions
 
-- Whisper model binaries are fetched from `ggerganov/whisper.cpp` model assets.
+- Whisper model binaries are fetched from `ggerganov/whisper.cpp` model assets from Huggingface repo.
 - Diarization model pack is fetched from
   `openresearchtools/speaker-diarization-community-1-GGUF`.
 - OpenResearchTools publishes converted model artifacts for runtime compatibility.
