@@ -108,7 +108,10 @@ pub fn install_or_repair_runtime_with_backend(
     } else {
         assets.remove(0)
     };
-    on_status(format!("Installing runtime asset: {}", describe_asset(&asset)));
+    on_status(format!(
+        "Installing runtime asset: {}",
+        describe_asset(&asset)
+    ));
     let installed_dir = install_runtime_asset(runtime_dir, &asset, &mut on_status)?;
     on_status("Runtime install finished.".to_string());
     Ok(installed_dir)
@@ -140,7 +143,10 @@ pub fn available_runtime_backends(paths: &AppPaths) -> Result<Vec<String>> {
     Ok(out)
 }
 
-fn load_engine_manifest_local_or_cached(exe_dir: &Path, paths: &AppPaths) -> Result<EngineManifest> {
+fn load_engine_manifest_local_or_cached(
+    exe_dir: &Path,
+    paths: &AppPaths,
+) -> Result<EngineManifest> {
     let mut errors = Vec::<String>::new();
 
     for file in local_manifest_file_candidates(exe_dir) {

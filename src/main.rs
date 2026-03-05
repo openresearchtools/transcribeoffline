@@ -21,11 +21,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 use bridge::{AudioRunParams, BridgeApi, ChatRunParams, SharedBridgeParams};
 
@@ -304,21 +304,6 @@ fn detect_installed_windows_runtime_backend(runtime_dir: &Path) -> Option<String
     None
 }
 
-#[cfg(target_os = "windows")]
-fn pdfium_library_file_name() -> &'static str {
-    "pdfium.dll"
-}
-
-#[cfg(target_os = "macos")]
-fn pdfium_library_file_name() -> &'static str {
-    "libpdfium.dylib"
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn pdfium_library_file_name() -> &'static str {
-    "libpdfium.so"
-}
-
 fn ffmpeg_runtime_dir(runtime_dir: &Path) -> PathBuf {
     if cfg!(target_os = "windows") {
         runtime_dir.join("vendor").join("ffmpeg").join("bin")
@@ -343,17 +328,6 @@ fn runtime_missing_messages(runtime_dir: &Path) -> Vec<String> {
         missing.push(format!(
             "Missing bridge library: {}",
             bridge_library_file_name()
-        ));
-    }
-
-    let pdfium = runtime_dir
-        .join("vendor")
-        .join("pdfium")
-        .join(pdfium_library_file_name());
-    if !pdfium.exists() {
-        missing.push(format!(
-            "Missing PDFium runtime: vendor/pdfium/{}",
-            pdfium_library_file_name()
         ));
     }
 
@@ -439,8 +413,14 @@ fn write_embedded_unsigned_runtime_script() -> Result<(PathBuf, PathBuf)> {
 
     #[cfg(unix)]
     {
-        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("failed setting executable mode on '{}'", script_path.display()))?;
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).with_context(
+            || {
+                format!(
+                    "failed setting executable mode on '{}'",
+                    script_path.display()
+                )
+            },
+        )?;
     }
 
     Ok((temp_root, script_path))
@@ -962,6 +942,7 @@ struct UiApp {
     playback_pending_start: Option<(PathBuf, f64)>,
     playback_follow_pause_until: Option<Instant>,
     playback_click_sync_target: Option<(f64, Instant)>,
+    manual_edit_scroll_sync_y: Option<f32>,
     speaker_rename_entries: Vec<SpeakerRenameEntry>,
 
     playback: PlaybackState,
@@ -1126,6 +1107,7 @@ impl UiApp {
             playback_pending_start: None,
             playback_follow_pause_until: None,
             playback_click_sync_target: None,
+            manual_edit_scroll_sync_y: None,
             speaker_rename_entries: Vec::new(),
             playback: PlaybackState::default(),
             fonts_configured: false,
@@ -1205,16 +1187,16 @@ impl UiApp {
                 },
             )
             .and_then(|installed_dir| {
-                    let missing = runtime_missing_messages(&installed_dir);
-                    if missing.is_empty() {
-                        Ok(installed_dir)
-                    } else {
-                        Err(anyhow!(
-                            "Installed runtime is incomplete:\n{}",
-                            missing.join("\n")
-                        ))
-                    }
-                })
+                let missing = runtime_missing_messages(&installed_dir);
+                if missing.is_empty() {
+                    Ok(installed_dir)
+                } else {
+                    Err(anyhow!(
+                        "Installed runtime is incomplete:\n{}",
+                        missing.join("\n")
+                    ))
+                }
+            })
             .map_err(|err| err.to_string());
             let _ = tx.send(UiMessage::RuntimeInstallDone(result));
             let _ = tx.send(UiMessage::Refresh);
@@ -1363,8 +1345,7 @@ impl UiApp {
                     egui::ComboBox::from_id_salt("runtime_backend_windows_combo")
                         .selected_text(selected_text.to_ascii_uppercase())
                         .show_ui(ui, |ui| {
-                            for (idx, backend) in self.runtime_install_backends.iter().enumerate()
-                            {
+                            for (idx, backend) in self.runtime_install_backends.iter().enumerate() {
                                 let label = backend.to_ascii_uppercase();
                                 ui.selectable_value(&mut selected_index, idx, label);
                             }
@@ -2518,8 +2499,7 @@ impl UiApp {
                 .set_title("Select chat model file")
                 .add_filter("Model", &["gguf"])
                 .pick_file()
-        })
-        {
+        }) {
             self.settings.chat_model = path.display().to_string();
             self.queue_save();
         }
@@ -2867,8 +2847,7 @@ impl UiApp {
                 .set_title("Select media files")
                 .add_filter("Supported media", supported_media_extensions())
                 .pick_files()
-        })
-        {
+        }) {
             let mut found_existing_outputs = false;
             if let Ok(mut state) = self.runtime_state.lock() {
                 for path in paths {
@@ -2902,8 +2881,7 @@ impl UiApp {
             FileDialog::new()
                 .set_title("Select output/result files")
                 .pick_files()
-        })
-        {
+        }) {
             if let Ok(mut state) = self.runtime_state.lock() {
                 for path in paths {
                     ensure_output_entry(&mut state.output_entries, path.clone(), false);
@@ -3532,13 +3510,17 @@ impl UiApp {
         edit_pause || scroll_pause
     }
 
+    fn playback_follow_active(&self) -> bool {
+        playback_is_playing(&self.playback) || self.playback_click_sync_target.is_some()
+    }
+
     fn pause_follow_after_manual_scroll(&mut self) {
         self.playback_follow_pause_until =
             Some(Instant::now() + Duration::from_secs_f64(PLAYBACK_SCROLL_FOLLOW_PAUSE_SEC));
     }
 
-    fn mark_follow_pause_on_scroll_area(&mut self, ctx: &egui::Context, inner_rect: egui::Rect) {
-        let user_scrolled_here = ctx.input(|i| {
+    fn user_scrolled_in_rect(&self, ctx: &egui::Context, inner_rect: egui::Rect) -> bool {
+        ctx.input(|i| {
             let pointer_over = i
                 .pointer
                 .hover_pos()
@@ -3549,7 +3531,11 @@ impl UiApp {
             }
             let delta = i.raw_scroll_delta + i.smooth_scroll_delta;
             delta.x.abs() > f32::EPSILON || delta.y.abs() > f32::EPSILON
-        });
+        })
+    }
+
+    fn mark_follow_pause_on_scroll_area(&mut self, ctx: &egui::Context, inner_rect: egui::Rect) {
+        let user_scrolled_here = self.user_scrolled_in_rect(ctx, inner_rect);
         if user_scrolled_here {
             self.pause_follow_after_manual_scroll();
         }
@@ -4181,120 +4167,206 @@ impl UiApp {
                 .lines()
                 .map(|line| line.to_string())
                 .collect::<Vec<_>>();
-            let follow_paused = self.follow_paused_for_user_navigation();
+            let playback_follow_active = self.playback_follow_active();
+            let follow_paused = !playback_follow_active || self.follow_paused_for_user_navigation();
             if self.editing_enabled {
+                let mut original_scroll_info = None::<(f32, bool)>;
+                let mut edited_scroll_info = None::<(f32, bool)>;
+                let manual_edit_sync_enabled = !playback_follow_active;
+                let manual_sync_y = self.manual_edit_scroll_sync_y.unwrap_or(0.0).max(0.0);
                 ui.columns(2, |cols| {
                     engine_panel_frame().show(&mut cols[0], |ui| {
                         ui.set_min_height(transcript_height);
                         ui.set_max_height(transcript_height);
-                        let scroll_output = egui::ScrollArea::vertical()
+                        let highlight_range = active_range;
+                        let mut scroll_area = egui::ScrollArea::vertical()
                             .id_salt("original_transcript_lines")
                             .auto_shrink([false, false])
                             .scroll_bar_visibility(
                                 egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
                             )
-                            .max_height(transcript_height)
-                            .show(ui, |ui| {
-                                if transcript_lines.is_empty() {
-                                    ui.allocate_space(egui::vec2(
-                                        ui.available_width(),
-                                        (transcript_height - 8.0).max(0.0),
-                                    ));
-                                } else {
-                                    for (line_idx, line) in transcript_lines.iter().enumerate() {
-                                        let active = active_range
-                                            .map(|(start, end)| line_idx >= start && line_idx < end)
-                                            .unwrap_or(current_line == Some(line_idx));
-                                        let response = transcript_line_label(ui, line, active);
-                                        if response.clicked() {
-                                            self.seek_to_line(line_idx);
-                                        }
-                                        if active
-                                            && !follow_paused
-                                            && Some(line_idx) == active_anchor
-                                        {
-                                            response.scroll_to_me(Some(egui::Align::Center));
-                                        }
-                                    }
+                            .max_height(transcript_height);
+                        if manual_edit_sync_enabled {
+                            scroll_area = scroll_area.vertical_scroll_offset(manual_sync_y);
+                        }
+                        let scroll_output = scroll_area.show(ui, |ui| {
+                            let mut layouter =
+                                move |ui: &egui::Ui,
+                                      text: &dyn egui::TextBuffer,
+                                      wrap_width: f32| {
+                                    layouter_with_omitted_highlights(
+                                        ui,
+                                        text.as_str(),
+                                        wrap_width,
+                                        highlight_range,
+                                    )
+                                };
+                            let output = egui::TextEdit::multiline(&mut self.transcription_text)
+                                .id_salt("original_transcript_text")
+                                .font(egui::TextStyle::Body)
+                                .desired_width(f32::INFINITY)
+                                .min_size(egui::vec2(ui.available_width(), transcript_height))
+                                .interactive(false)
+                                .layouter(&mut layouter)
+                                .show(ui);
+                            let seek_overlay = ui.interact(
+                                output.response.rect,
+                                ui.make_persistent_id("original_transcript_seek_overlay"),
+                                egui::Sense::click(),
+                            );
+                            if seek_overlay.clicked() || seek_overlay.double_clicked() {
+                                if let Some(pointer_pos) = seek_overlay.interact_pointer_pos() {
+                                    let cursor = output
+                                        .galley
+                                        .cursor_from_pos(pointer_pos - output.galley_pos);
+                                    let line_idx = char_index_to_line_index(
+                                        &self.transcription_text,
+                                        cursor.index,
+                                    );
+                                    self.seek_to_line(line_idx);
                                 }
-                            });
-                        self.mark_follow_pause_on_scroll_area(ui.ctx(), scroll_output.inner_rect);
+                            }
+                            if !follow_paused {
+                                if let Some(line_idx) = active_anchor {
+                                    let char_idx =
+                                        line_start_char_index(&self.transcription_text, line_idx);
+                                    let cursor = egui::text::CCursor::new(char_idx);
+                                    let cursor_rect = output
+                                        .galley
+                                        .pos_from_cursor(cursor)
+                                        .translate(output.galley_pos.to_vec2());
+                                    ui.scroll_to_rect(cursor_rect, Some(egui::Align::Center));
+                                }
+                            }
+                        });
+                        let user_scrolled =
+                            self.user_scrolled_in_rect(ui.ctx(), scroll_output.inner_rect);
+                        if user_scrolled {
+                            self.pause_follow_after_manual_scroll();
+                        }
+                        original_scroll_info =
+                            Some((scroll_output.state.offset.y.max(0.0), user_scrolled));
                     });
 
                     engine_panel_frame().show(&mut cols[1], |ui| {
                         ui.set_min_height(transcript_height);
                         ui.set_max_height(transcript_height);
                         let highlight_range = edited_active_range;
-                        let scroll_output = egui::ScrollArea::vertical()
+                        let mut scroll_area = egui::ScrollArea::vertical()
                             .id_salt("edited_transcript_scroll")
                             .auto_shrink([false, false])
                             .scroll_bar_visibility(
                                 egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
                             )
-                            .max_height(transcript_height)
-                            .show(ui, |ui| {
-                                let mut layouter =
-                                    move |ui: &egui::Ui,
-                                          text: &dyn egui::TextBuffer,
-                                          wrap_width: f32| {
-                                        layouter_with_omitted_highlights(
-                                            ui,
-                                            text.as_str(),
-                                            wrap_width,
-                                            highlight_range,
-                                        )
-                                    };
-                                let output = egui::TextEdit::multiline(&mut self.edited_text)
-                                    .id_salt("edited_transcript_text")
-                                    .font(egui::TextStyle::Body)
-                                    .desired_width(f32::INFINITY)
-                                    .min_size(egui::vec2(ui.available_width(), transcript_height))
-                                    .layouter(&mut layouter)
-                                    .show(ui);
+                            .max_height(transcript_height);
+                        if manual_edit_sync_enabled {
+                            scroll_area = scroll_area.vertical_scroll_offset(manual_sync_y);
+                        }
+                        let scroll_output = scroll_area.show(ui, |ui| {
+                            let mut layouter =
+                                move |ui: &egui::Ui,
+                                      text: &dyn egui::TextBuffer,
+                                      wrap_width: f32| {
+                                    layouter_with_omitted_highlights(
+                                        ui,
+                                        text.as_str(),
+                                        wrap_width,
+                                        highlight_range,
+                                    )
+                                };
+                            let output = egui::TextEdit::multiline(&mut self.edited_text)
+                                .id_salt("edited_transcript_text")
+                                .font(egui::TextStyle::Body)
+                                .desired_width(f32::INFINITY)
+                                .min_size(egui::vec2(ui.available_width(), transcript_height))
+                                .layouter(&mut layouter)
+                                .show(ui);
 
-                                if output.response.clicked() {
-                                    let delay =
-                                        self.settings.edit_cursor_resync_delay_sec.max(0.0) as f64;
-                                    self.edit_pause_until =
-                                        Some(Instant::now() + Duration::from_secs_f64(delay));
+                            if output.response.clicked() {
+                                let delay =
+                                    self.settings.edit_cursor_resync_delay_sec.max(0.0) as f64;
+                                self.edit_pause_until =
+                                    Some(Instant::now() + Duration::from_secs_f64(delay));
+                            }
+                            let changed = output.response.changed();
+                            if changed {
+                                let delay = self.settings.edit_autosave_delay_sec.max(0.5) as f64;
+                                self.edit_pause_until =
+                                    Some(Instant::now() + Duration::from_secs_f64(delay));
+                                self.edited_cues = parse_transcript(&self.edited_text).cues;
+                            }
+                            if output.response.double_clicked() {
+                                if let Some(pointer_pos) = output.response.interact_pointer_pos() {
+                                    let cursor = output
+                                        .galley
+                                        .cursor_from_pos(pointer_pos - output.galley_pos);
+                                    let line_idx =
+                                        char_index_to_line_index(&self.edited_text, cursor.index);
+                                    self.seek_to_edited_line(line_idx);
+                                } else if let Some(cursor_range) = output.cursor_range {
+                                    let line_idx = char_index_to_line_index(
+                                        &self.edited_text,
+                                        cursor_range.primary.index,
+                                    );
+                                    self.seek_to_edited_line(line_idx);
                                 }
-                                let changed = output.response.changed();
-                                if changed {
-                                    let delay =
-                                        self.settings.edit_autosave_delay_sec.max(0.5) as f64;
-                                    self.edit_pause_until =
-                                        Some(Instant::now() + Duration::from_secs_f64(delay));
-                                    self.edited_cues = parse_transcript(&self.edited_text).cues;
+                            }
+                            if !follow_paused {
+                                if let Some(line_idx) = edited_active_anchor {
+                                    let char_idx =
+                                        line_start_char_index(&self.edited_text, line_idx);
+                                    let cursor = egui::text::CCursor::new(char_idx);
+                                    let range = egui::text::CCursorRange::one(cursor);
+                                    let mut state = output.state.clone();
+                                    state.cursor.set_char_range(Some(range));
+                                    state.store(ui.ctx(), output.response.id);
+                                    let cursor_rect = output
+                                        .galley
+                                        .pos_from_cursor(cursor)
+                                        .translate(output.galley_pos.to_vec2());
+                                    ui.scroll_to_rect(cursor_rect, Some(egui::Align::Center));
                                 }
-                                if output.response.double_clicked() {
-                                    if let Some(cursor_range) = output.cursor_range {
-                                        let line_idx = char_index_to_line_index(
-                                            &self.edited_text,
-                                            cursor_range.primary.index,
-                                        );
-                                        self.seek_to_edited_line(line_idx);
-                                    }
-                                }
-                                if !follow_paused {
-                                    if let Some(line_idx) = edited_active_anchor {
-                                        let char_idx =
-                                            line_start_char_index(&self.edited_text, line_idx);
-                                        let cursor = egui::text::CCursor::new(char_idx);
-                                        let range = egui::text::CCursorRange::one(cursor);
-                                        let mut state = output.state.clone();
-                                        state.cursor.set_char_range(Some(range));
-                                        state.store(ui.ctx(), output.response.id);
-                                        let cursor_rect = output
-                                            .galley
-                                            .pos_from_cursor(cursor)
-                                            .translate(output.galley_pos.to_vec2());
-                                        ui.scroll_to_rect(cursor_rect, Some(egui::Align::Center));
-                                    }
-                                }
-                            });
-                        self.mark_follow_pause_on_scroll_area(ui.ctx(), scroll_output.inner_rect);
+                            }
+                        });
+                        let user_scrolled =
+                            self.user_scrolled_in_rect(ui.ctx(), scroll_output.inner_rect);
+                        if user_scrolled {
+                            self.pause_follow_after_manual_scroll();
+                        }
+                        edited_scroll_info =
+                            Some((scroll_output.state.offset.y.max(0.0), user_scrolled));
                     });
                 });
+                let selected_sync_y = if manual_edit_sync_enabled {
+                    match (original_scroll_info, edited_scroll_info) {
+                        (Some((left_y, left_scrolled)), Some((right_y, right_scrolled))) => {
+                            let left_delta = (left_y - manual_sync_y).abs();
+                            let right_delta = (right_y - manual_sync_y).abs();
+                            if left_delta > 0.5 || right_delta > 0.5 {
+                                if left_delta >= right_delta {
+                                    Some(left_y)
+                                } else {
+                                    Some(right_y)
+                                }
+                            } else if left_scrolled && !right_scrolled {
+                                Some(left_y)
+                            } else if right_scrolled && !left_scrolled {
+                                Some(right_y)
+                            } else {
+                                self.manual_edit_scroll_sync_y.or(Some(left_y))
+                            }
+                        }
+                        (Some((left_y, _)), None) => Some(left_y),
+                        (None, Some((right_y, _))) => Some(right_y),
+                        (None, None) => self.manual_edit_scroll_sync_y,
+                    }
+                } else {
+                    original_scroll_info
+                        .map(|(left_y, _)| left_y)
+                        .or_else(|| edited_scroll_info.map(|(right_y, _)| right_y))
+                        .or(self.manual_edit_scroll_sync_y)
+                };
+                self.manual_edit_scroll_sync_y = selected_sync_y.map(|v| v.max(0.0));
             } else {
                 engine_panel_frame().show(ui, |ui| {
                     ui.set_min_height(transcript_height);
@@ -5241,12 +5313,7 @@ fn sync_runtime_backend_from_installed_runtime(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (
-            runtime_dir,
-            settings,
-            backends,
-            selected_backend_index,
-        );
+        let _ = (runtime_dir, settings, backends, selected_backend_index);
         false
     }
 }
@@ -6630,7 +6697,6 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
-
 }
 
 fn main() {
