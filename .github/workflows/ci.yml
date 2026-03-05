@@ -14,7 +14,7 @@ on:
         default: true
         type: boolean
       release_tag:
-        description: "Release tag (e.g. v2.0.0). Empty = current ref name"
+        description: "Optional explicit tag (X.Y or X.Y.Z, optional v prefix). Empty = auto-generated."
         required: false
         default: ""
         type: string
@@ -159,22 +159,115 @@ jobs:
           name: ubuntu-x64
           path: release-input/ubuntu-x64
 
+      - name: Resolve release metadata
+        id: meta
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const manualTagRaw = `${{ inputs.release_tag }}`.trim();
+            const manualNameRaw = `${{ inputs.release_name }}`.trim();
+            const isPrerelease = `${{ inputs.prerelease }}` === "true";
+
+            const normalize = (tag) =>
+              String(tag || "")
+                .trim()
+                .replace(/^refs\/tags\//, "")
+                .replace(/^v/, "");
+
+            const parseVersion = (tag) => {
+              const t = normalize(tag);
+              const m = t.match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?$/);
+              if (!m) return null;
+              return {
+                major: Number.parseInt(m[1], 10),
+                minor: Number.parseInt(m[2] ?? "0", 10),
+                patch: Number.parseInt(m[3] ?? "0", 10),
+              };
+            };
+
+            const cmp = (a, b) =>
+              a.major - b.major || a.minor - b.minor || a.patch - b.patch;
+
+            const tags = await github.paginate(github.rest.repos.listTags, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+
+            const existingTagNames = new Set(tags.map((t) => normalize(t.name)));
+            const stableVersions = releases
+              .filter((r) => !r.draft && !r.prerelease)
+              .map((r) => parseVersion(r.tag_name))
+              .filter(Boolean)
+              .sort(cmp);
+
+            let tag;
+            let version;
+
+            if (manualTagRaw.length > 0) {
+              tag = normalize(manualTagRaw);
+              version = parseVersion(tag);
+              if (!version) {
+                core.setFailed(
+                  `Invalid release_tag '${manualTagRaw}'. Use X.Y or X.Y.Z (optional v prefix).`,
+                );
+                return;
+              }
+            } else {
+              const latestStable =
+                stableVersions.length > 0
+                  ? stableVersions[stableVersions.length - 1]
+                  : null;
+
+              if (isPrerelease) {
+                const baseMajor = latestStable ? latestStable.major : 1;
+                const baseMinor = latestStable ? latestStable.minor + 1 : 0;
+                const usedPatches = tags
+                  .map((t) => parseVersion(t.name))
+                  .filter((v) => v && v.major === baseMajor && v.minor === baseMinor)
+                  .map((v) => v.patch);
+                const nextPatch =
+                  usedPatches.length > 0 ? Math.max(...usedPatches) + 1 : 0;
+                version = { major: baseMajor, minor: baseMinor, patch: nextPatch };
+                tag = `${version.major}.${version.minor}.${version.patch}`;
+              } else {
+                let major = 1;
+                let minor = 0;
+                if (latestStable) {
+                  major = latestStable.major;
+                  minor = latestStable.minor + 1;
+                }
+                tag = `${major}.${minor}`;
+                while (existingTagNames.has(tag)) {
+                  minor += 1;
+                  tag = `${major}.${minor}`;
+                }
+                version = { major, minor, patch: 0 };
+              }
+            }
+
+            const releaseName = manualNameRaw.length > 0 ? manualNameRaw : tag;
+            const fullVersion = `${version.major}.${version.minor}.${version.patch}`;
+
+            core.setOutput("tag", tag);
+            core.setOutput("name", releaseName);
+            core.setOutput("version", fullVersion);
+            core.notice(
+              `Resolved release tag '${tag}' (version ${fullVersion}, prerelease=${isPrerelease}).`,
+            );
+
       - name: Prepare release files
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-assets
-
-          tag="${{ inputs.release_tag }}"
-          if [[ -z "$tag" ]]; then
-            tag="${GITHUB_REF_NAME}"
-          fi
-          tag="${tag#refs/tags/}"
-          version="${tag#v}"
-          if [[ -z "$version" || "$version" == "$tag" ]]; then
-            echo "Release tag must start with 'v' (got '$tag')." >&2
-            exit 1
-          fi
+          tag="${{ steps.meta.outputs.tag }}"
+          version="${{ steps.meta.outputs.version }}"
 
           if [[ -f "release-input/windows-x64/Transcribe Offline.exe" ]]; then
             cp "release-input/windows-x64/Transcribe Offline.exe" \
@@ -257,37 +350,13 @@ jobs:
 
           ls -la release-assets
 
-      - name: Resolve release metadata
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          tag="${{ inputs.release_tag }}"
-          if [[ -z "$tag" ]]; then
-            tag="${GITHUB_REF_NAME}"
-          fi
-          tag="${tag#refs/tags/}"
-          if [[ ! "$tag" =~ ^v ]]; then
-            echo "Release tag must start with 'v' (got '$tag')." >&2
-            exit 1
-          fi
-
-          name="${{ inputs.release_name }}"
-          if [[ -z "$name" ]]; then
-            name="$tag"
-          fi
-
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "name=$name" >> "$GITHUB_OUTPUT"
-
       - name: Build release page body
         shell: bash
         run: |
           set -euo pipefail
 
           tag="${{ steps.meta.outputs.tag }}"
-          version="${tag#v}"
+          version="${{ steps.meta.outputs.version }}"
           repo="${GITHUB_REPOSITORY}"
           base_url="https://github.com/${repo}/releases/download/${tag}"
 
