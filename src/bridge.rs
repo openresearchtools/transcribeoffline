@@ -1,10 +1,12 @@
 use anyhow::{anyhow, bail, Context, Result};
 use libloading::Library;
-use serde_json::Value;
+use regex::Regex;
+use serde_json::{json, Value};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::OnceLock;
 
 #[repr(C)]
 pub struct llama_server_bridge {
@@ -404,7 +406,24 @@ impl BridgeApi {
         unsafe {
             (self.json_result_free)(&mut out);
         }
-        serde_json::from_str(&json_text).map_err(|e| anyhow!("invalid audio response json: {e}"))
+        match serde_json::from_str::<Value>(&json_text) {
+            Ok(parsed) => Ok(parsed),
+            Err(parse_err) => {
+                // Keep transcription flow alive even if the runtime returns malformed/non-UTF JSON.
+                // The caller already has deterministic fallback output path logic.
+                let mut fallback = serde_json::Map::new();
+                fallback.insert(
+                    "_bridge_json_parse_warning".to_string(),
+                    Value::String(format!(
+                        "audio response JSON parse failed; fallback mode enabled: {parse_err}"
+                    )),
+                );
+                if let Some(path) = extract_output_path_from_jsonish(&json_text) {
+                    fallback.insert("output".to_string(), json!({ "path": path }));
+                }
+                Ok(Value::Object(fallback))
+            }
+        }
     }
 
     fn create_bridge<'a>(
@@ -538,6 +557,49 @@ fn cstr_from_const(ptr: *const c_char) -> String {
 
 fn cstr_from_mut(ptr: *mut c_char) -> String {
     cstr_from_const(ptr as *const c_char)
+}
+
+fn extract_output_path_from_jsonish(raw: &str) -> Option<String> {
+    static OUTPUT_PATH_RE: OnceLock<Regex> = OnceLock::new();
+    static PATH_RE: OnceLock<Regex> = OnceLock::new();
+
+    let output_path_re = OUTPUT_PATH_RE.get_or_init(|| {
+        Regex::new(r#""output"\s*:\s*\{[^{}]*"path"\s*:\s*"(?P<path>(?:\\.|[^"\\])*)""#)
+            .expect("valid output path regex")
+    });
+    if let Some(path) = capture_json_string_group(output_path_re, raw, "path") {
+        return Some(path);
+    }
+
+    let path_re = PATH_RE.get_or_init(|| {
+        Regex::new(r#""path"\s*:\s*"(?P<path>(?:\\.|[^"\\])*)""#).expect("valid path regex")
+    });
+    capture_json_string_group(path_re, raw, "path")
+}
+
+fn capture_json_string_group(re: &Regex, raw: &str, group: &str) -> Option<String> {
+    let caps = re.captures(raw)?;
+    let escaped = caps.name(group)?.as_str();
+    serde_json::from_str::<String>(&format!("\"{escaped}\"")).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_output_path_from_jsonish;
+
+    #[test]
+    fn extracts_nested_output_path() {
+        let raw = r#"{"ok":1,"output":{"path":"/tmp/output-file.md"}}"#;
+        let path = extract_output_path_from_jsonish(raw).expect("path should parse");
+        assert_eq!(path, "/tmp/output-file.md");
+    }
+
+    #[test]
+    fn extracts_flat_path_when_output_object_missing() {
+        let raw = r#"{"path":"C:\\tmp\\output-file.md","status":200}"#;
+        let path = extract_output_path_from_jsonish(raw).expect("path should parse");
+        assert_eq!(path, r#"C:\tmp\output-file.md"#);
+    }
 }
 
 #[cfg(windows)]
