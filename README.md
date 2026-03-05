@@ -148,8 +148,7 @@ The Transcribe Offline application source code is licensed under the MIT License
 
 Read these files in this repo:
 
-- License index: `licenses/README.md`
-- Consolidated notice page (app + models + engine): `licenses/THIRD_PARTY_NOTICES_ALL.md`
+- Notice page (app + models + engine): `licenses/THIRD_PARTY_NOTICES_ALL.md`
 - Full app third-party licenses (full text per package): `licenses/APP_THIRD_PARTY_LICENSES_FULL.md`
 - Full engine third-party licenses (full text per package/file): `licenses/ENGINE_THIRD_PARTY_LICENSES_FULL.md`
 - `Help -> Notices`
