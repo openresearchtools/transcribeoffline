@@ -67,7 +67,7 @@ export TRANSFORMERS_CACHE="$MODELS_DIR"
 # =====================================================================
 # 0) Fetch app files from GitHub (Linux folder) — NO execution here
 # =====================================================================
-RAW_BASE='https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Linux'
+RAW_BASE='https://raw.githubusercontent.com/openresearchtools/transcribeoffline/Legacy/Linux'
 
 ensure_downloader() {
   if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then return 0; fi

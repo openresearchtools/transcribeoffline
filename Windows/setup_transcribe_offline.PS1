@@ -210,7 +210,7 @@ function Download-File([string]$Url, [string]$Dest, [ValidateSet('Text','Binary'
   if (-not (Test-Path -LiteralPath $Dest) -or ((Get-Item $Dest).Length -eq 0)) { Halt "Failed to download: $Url" }
 }
 
-$RAW = 'https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows'
+$RAW = 'https://raw.githubusercontent.com/openresearchtools/transcribeoffline/Legacy/Windows'
 Download-File "$RAW/main.py"                                   (Join-Path $ProjDir 'main.py')
 Download-File "$RAW/models.py"                                 (Join-Path $ProjDir 'models.py')
 Download-File "$RAW/content/AppIcon.ico"                       (Join-Path $Dirs.content  'AppIcon.ico')

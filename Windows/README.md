@@ -39,7 +39,7 @@
    <img width="404" height="210" alt="image" src="https://github.com/user-attachments/assets/dce49f98-6782-4351-8164-687dac9a4d51" />
 4. Run the following command in the console.
     ```
-   Set-ExecutionPolicy -Scope Process Bypass -Force; iex (irm 'https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.PS1')
+   Set-ExecutionPolicy -Scope Process Bypass -Force; iex (irm 'https://raw.githubusercontent.com/openresearchtools/transcribeoffline/Legacy/Windows/setup_transcribe_offline.PS1')
     ```
 By default, the script installs the app into your **Downloads** folder.  
 4. Follow the instructions for gated models and download the models in the window that opens
@@ -60,7 +60,7 @@ Desktop Shortcut, as well as Shortcuts for model downloader and the app itself w
 2.  Open **RStudio**.
 3. Run the following command in the console
     ```
-   source("https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/setup_transcribe_offline.R")
+   source("https://raw.githubusercontent.com/openresearchtools/transcribeoffline/Legacy/Windows/setup_transcribe_offline.R")
     ```
  By default, the script installs the app into your **Downloads** folder.  
 4. Follow the instructions for gated models and download the models in the window that opens

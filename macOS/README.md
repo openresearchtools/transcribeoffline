@@ -39,7 +39,7 @@ PyInstaller build and distributed with the application.
 
 - **macOS (Apple Silicon)** only for now (M1/M2/M3/M4 - with recommended minimum 16GB of RAM, smaller audio files can work on 8GB systems).  
 - **Intel Macs** are **not supported**.  
---**Windows Version** is here https://github.com/openresearchtools/transcribeoffline/tree/main/Windows 
+--**Windows Version** is here https://github.com/openresearchtools/transcribeoffline/tree/Legacy/Windows 
 ---
 ## Option 1) Pre‑compiled app
 
@@ -63,7 +63,7 @@ This compiles the app **on your machine** and installs it into **/Applications**
 Open Terminal and paste the following command:
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/macOS/install.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/openresearchtools/transcribeoffline/Legacy/macOS/install.sh)"
 ```
 
 **What the installer does**

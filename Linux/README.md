@@ -36,7 +36,7 @@
     ```
 2. Run the following command in **Terminal**.
     ```
-   bash -c 'set -e; URL="https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Linux/setup_transcribe_offline_ubuntu.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$URL" | bash; elif command -v wget >/dev/null 2>&1; then wget -qO- "$URL" | bash; else sudo apt-get update -y && sudo apt-get install -y curl && curl -fsSL "$URL" | bash; fi'
+   bash -c 'set -e; URL="https://raw.githubusercontent.com/openresearchtools/transcribeoffline/Legacy/Linux/setup_transcribe_offline_ubuntu.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$URL" | bash; elif command -v wget >/dev/null 2>&1; then wget -qO- "$URL" | bash; else sudo apt-get update -y && sudo apt-get install -y curl && curl -fsSL "$URL" | bash; fi'
     ```
 By default, script checks if you have **Python 3.11-Tk** (Important part is TK, as default Python does not ship Tkinter on Linux), if not, then it installs Python 3.11-Tk, creates virtual environment and installs the app into your **Downloads** folder.  
 3. Follow the instructions for gated models and download the models in the window that opens

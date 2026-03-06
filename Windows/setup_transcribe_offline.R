@@ -180,7 +180,7 @@ st <- system2(py, c("-m","pip","install","--no-deps","-r", shQuote(req_path)))
 if (!identical(st, 0L)) halt("pip install --no-deps failed.")
 
 # Download app sources
-RAW <- "https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows"
+RAW <- "https://raw.githubusercontent.com/openresearchtools/transcribeoffline/Legacy/Windows"
 dl <- function(url, dest, mode = "wb") {
   wlog("Downloading:", url)
   utils::download.file(url, destfile = dest, mode = mode, quiet = TRUE)
@@ -236,7 +236,7 @@ if (!file.exists(file.path(dirs$llama, "llama-cli.exe"))) halt("llama-cli.exe no
 wlog("llama.cpp OK.")
 
 # Download models.py (GUI) into the project root
-models_url <- "https://raw.githubusercontent.com/openresearchtools/transcribeoffline/main/Windows/models.py"
+models_url <- "https://raw.githubusercontent.com/openresearchtools/transcribeoffline/Legacy/Windows/models.py"
 models_path <- file.path(proj_dir, "models.py")
 dl(models_url, models_path, mode = "wb")
 wlog("Downloaded models.py:", models_path)
