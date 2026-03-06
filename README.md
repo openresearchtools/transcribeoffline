@@ -1,9 +1,7 @@
 # Transcribe Offline
 
-> **Active development notice:** This branch is under active development and
-> may change frequently. Speaker diarization currently supports conversations
-> with up to 2 speakers only. For stable use, please use the
-> [`Legacy` branch](https://github.com/openresearchtools/transcribeoffline/tree/Legacy).
+> [!WARNING]
+> **Active development notice:** This branch is under active development and may change frequently. Speaker diarization currently supports conversations with up to 2 speakers only. For stable use, please use the [`Legacy` branch](https://github.com/openresearchtools/transcribeoffline/tree/Legacy).
 
 ![Transcribe Offline Demo](Demo.png)
 
