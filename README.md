@@ -125,8 +125,12 @@ If your environment blocks unsigned binaries, the recommended path is:
 
 ## Model acknowledgements (upstream model repos)
 
-- [`ggerganov/whisper.cpp`](https://github.com/ggml-org/whisper.cpp) and [`ggerganov/whisper.cpp` models on Hugging Face](https://huggingface.co/ggerganov/whisper.cpp):
-  upstream Whisper model family and GGML/GGUF model distribution source used by runtime transcription workflows.
+- [`openresearchtools/whisper-large-v3-turbo-GGML`](https://huggingface.co/openresearchtools/whisper-large-v3-turbo-GGML)
+  and [`openresearchtools/whisper-large-v3-GGML`](https://huggingface.co/openresearchtools/whisper-large-v3-GGML):
+  converted Whisper runtime artifacts used by the app's managed transcription downloads.
+- [`openai/whisper-large-v3-turbo`](https://huggingface.co/openai/whisper-large-v3-turbo)
+  and [`openai/whisper-large-v3`](https://huggingface.co/openai/whisper-large-v3):
+  upstream Whisper model family references for the managed transcription downloads.
 - [`openresearchtools/speaker-diarization-community-1-GGUF`](https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF):
   diarization model-pack repository used by the engine diarization path in this app.
 - [`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1):
@@ -156,7 +160,9 @@ Read these files in this repo:
 
 ## Models and conversions
 
-- Whisper model binaries are fetched from `ggerganov/whisper.cpp` model assets from Huggingface repo.
+- Whisper model binaries are fetched from
+  `openresearchtools/whisper-large-v3-turbo-GGML` and
+  `openresearchtools/whisper-large-v3-GGML`.
 - Diarization model pack is fetched from
   `openresearchtools/speaker-diarization-community-1-GGUF`.
 - OpenResearchTools publishes converted model artifacts for runtime compatibility.

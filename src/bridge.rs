@@ -64,6 +64,9 @@ pub struct llama_server_bridge_chat_request {
     pub dry_multiplier: f32,
     pub dry_allowed_length: i32,
     pub dry_penalty_last_n: i32,
+    pub reasoning: *const c_char,
+    pub reasoning_budget: i32,
+    pub reasoning_format: *const c_char,
 }
 
 #[repr(C)]
@@ -247,6 +250,9 @@ pub struct ChatRunParams {
     pub model_path: String,
     pub prompt: String,
     pub n_predict: i32,
+    pub reasoning: Option<String>,
+    pub reasoning_budget: i32,
+    pub reasoning_format: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -318,6 +324,7 @@ pub const AUDIO_EVENT_FLAG_FROM_BUFFER_REPLAY: u32 = 1u32 << 1;
 pub const AUDIO_EVENT_FLAG_PREVIEW: u32 = 1u32 << 2;
 pub const AUDIO_EVENT_FLAG_SNAPSHOT_START: u32 = 1u32 << 3;
 pub const AUDIO_EVENT_FLAG_SNAPSHOT_END: u32 = 1u32 << 4;
+pub const REASONING_BUDGET_UNSET: i32 = i32::MIN;
 
 pub struct BridgeApi {
     runtime_dir: PathBuf,
@@ -597,6 +604,16 @@ impl BridgeApi {
         let bridge = self.create_bridge(shared, &run.model_path, false)?;
         let prompt_c =
             CString::new(run.prompt.as_str()).context("chat prompt contains NUL byte")?;
+        let reasoning_c = run
+            .reasoning
+            .as_ref()
+            .map(|value| CString::new(value.as_str()).context("reasoning contains NUL byte"))
+            .transpose()?;
+        let reasoning_format_c = run
+            .reasoning_format
+            .as_ref()
+            .map(|value| CString::new(value.as_str()).context("reasoning format contains NUL byte"))
+            .transpose()?;
 
         let mut req = unsafe { (self.default_chat_request)() };
         req.prompt = prompt_c.as_ptr();
@@ -607,6 +624,13 @@ impl BridgeApi {
         req.top_k = -1;
         req.min_p = 0.0;
         req.seed = -1;
+        req.reasoning = reasoning_c
+            .as_ref()
+            .map_or(ptr::null(), |value| value.as_ptr());
+        req.reasoning_budget = run.reasoning_budget;
+        req.reasoning_format = reasoning_format_c
+            .as_ref()
+            .map_or(ptr::null(), |value| value.as_ptr());
 
         let mut out = unsafe { (self.empty_vlm_result)() };
         let rc = unsafe { (self.chat_complete)(bridge.ptr, &req, &mut out) };

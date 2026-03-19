@@ -7,8 +7,9 @@ use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
 use crate::bridge::{
-    AudioSessionEvent, llama_server_bridge_audio_event, llama_server_bridge_audio_session_params,
+    llama_server_bridge_audio_event, llama_server_bridge_audio_session_params,
     llama_server_bridge_audio_transcription_params, llama_server_bridge_realtime_params,
+    AudioSessionEvent,
 };
 
 #[repr(C)]
@@ -71,8 +72,10 @@ type FnAudioLiveDrainEvents = unsafe extern "C" fn(
     usize,
 ) -> i32;
 type FnAudioLiveFreeEvents = unsafe extern "C" fn(*mut llama_server_bridge_audio_event, usize);
-type FnAudioLiveGetOutputPaths =
-    unsafe extern "C" fn(*const llama_server_audio_live, *mut llama_server_audio_output_paths) -> i32;
+type FnAudioLiveGetOutputPaths = unsafe extern "C" fn(
+    *const llama_server_audio_live,
+    *mut llama_server_audio_output_paths,
+) -> i32;
 type FnAudioOutputPathsFree = unsafe extern "C" fn(*mut llama_server_audio_output_paths);
 type FnAudioLiveLastError = unsafe extern "C" fn(*const llama_server_audio_live) -> *const c_char;
 
@@ -161,7 +164,10 @@ impl AudioCaptureApi {
         configure_runtime_loader_paths(&runtime_dir);
         let library_path = audio_library_path(&runtime_dir);
         if !library_path.exists() {
-            bail!("missing audio capture library: '{}'", library_path.display());
+            bail!(
+                "missing audio capture library: '{}'",
+                library_path.display()
+            );
         }
 
         let lib = unsafe { Library::new(&library_path) }
@@ -262,8 +268,8 @@ impl AudioCaptureApi {
     pub fn create_live<'a>(&'a self, config: &AudioLiveConfig) -> Result<AudioLiveHandle<'a>> {
         let output_dir_c = CString::new(config.output_dir.to_string_lossy().as_ref())
             .context("live output_dir contains NUL byte")?;
-        let session_name_c =
-            CString::new(config.session_name.as_str()).context("live session_name contains NUL byte")?;
+        let session_name_c = CString::new(config.session_name.as_str())
+            .context("live session_name contains NUL byte")?;
         let capture_device_name_c = match config.capture_device_name.as_deref() {
             Some(value) if !value.trim().is_empty() => {
                 Some(CString::new(value).context("live capture_device_name contains NUL byte")?)
@@ -306,7 +312,8 @@ impl AudioCaptureApi {
         params.event_queue_capacity = config.event_queue_capacity;
         params.session_params = config.session_params;
         params.transcription_params = config.transcription_params;
-        params.transcription_params.realtime_params.model_path = transcription_model_path_c.as_ptr();
+        params.transcription_params.realtime_params.model_path =
+            transcription_model_path_c.as_ptr();
         params.transcription_params.realtime_params.backend_name =
             transcription_backend_name_c.as_ptr();
 
@@ -399,11 +406,15 @@ impl AudioLiveHandle<'_> {
     }
 
     pub fn wait_events(&self, timeout_ms: u32) -> Result<i32> {
-        let rc = self.api.with_runtime_cwd(|| unsafe {
-            (self.api.live_wait_events)(self.ptr, timeout_ms)
-        })?;
+        let rc = self
+            .api
+            .with_runtime_cwd(|| unsafe { (self.api.live_wait_events)(self.ptr, timeout_ms) })?;
         if rc < 0 {
-            bail!("audio live wait failed rc={} err='{}'", rc, self.last_error());
+            bail!(
+                "audio live wait failed rc={} err='{}'",
+                rc,
+                self.last_error()
+            );
         }
         Ok(rc)
     }
@@ -415,7 +426,11 @@ impl AudioLiveHandle<'_> {
             (self.api.live_drain_events)(self.ptr, &mut ptr_events, &mut count, max_events)
         })?;
         if rc != 0 {
-            bail!("audio live drain failed rc={} err='{}'", rc, self.last_error());
+            bail!(
+                "audio live drain failed rc={} err='{}'",
+                rc,
+                self.last_error()
+            );
         }
 
         let mut out = Vec::with_capacity(count);
@@ -506,7 +521,8 @@ fn configure_runtime_loader_paths(runtime_dir: &Path) {
             .join("bin"),
     );
 
-    let mut existing = env::split_paths(&env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
+    let mut existing =
+        env::split_paths(&env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
     let mut to_prepend = Vec::<PathBuf>::new();
     for dir in dirs {
         if !dir.exists() {

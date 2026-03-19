@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use settings::{
     app_paths, default_diarization_models_dir, default_live_transcription_model_path,
     default_whisper_model_path, ensure_dirs, load_settings, save_model_links, save_settings,
-    AppPaths, AppSettings,
+    whisper_model_repo_dir, AppPaths, AppSettings,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
@@ -32,7 +32,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bridge::{AudioRunParams, BridgeApi, ChatRunParams, SharedBridgeParams};
+use bridge::{
+    AudioRunParams, BridgeApi, ChatRunParams, SharedBridgeParams, REASONING_BUDGET_UNSET,
+};
 use live::{
     enumerate_input_device_options, resolve_input_device_index, ActiveLiveCapture,
     LiveInputDeviceOption,
@@ -43,8 +45,11 @@ const UI_FONT_SIZE_DEFAULT_PX: f32 = 12.0;
 const UI_FONT_SIZE_MIN_PX: f32 = 10.0;
 const UI_FONT_SIZE_MAX_PX: f32 = 22.0;
 const UI_FONT_SIZE_STEP_PX: f32 = 1.0;
+const LIVE_TRANSCRIPTION_REPO_URL: &str =
+    "https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602";
 const DIARIZATION_REPO: &str =
     "https://huggingface.co/openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf";
+const CHAT_REPO_URL: &str = "https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF";
 const SORTFORMER_MODEL_FILE: &str = "diar_streaming_sortformer_4spk-v2.1.gguf";
 const ANONYMISE_TOOLTIP: &str =
     "Anonymise (beta) requires a chat model configured in Settings -> Chat settings.";
@@ -90,10 +95,19 @@ struct WhisperModelSpec {
     label: &'static str,
     file_name: &'static str,
     url: &'static str,
+    repo_label: &'static str,
+    repo_url: &'static str,
 }
 
 #[derive(Clone, Copy)]
 struct LiveModelSpec {
+    label: &'static str,
+    file_name: &'static str,
+    url: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct ChatModelSpec {
     label: &'static str,
     file_name: &'static str,
     url: &'static str,
@@ -222,6 +236,19 @@ fn tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response 
             .corner_radius(egui::CornerRadius::same(6))
             .min_size(egui::vec2(0.0, 22.0)),
     )
+}
+
+fn model_repo_license_note(
+    ui: &mut egui::Ui,
+    repo_label: &str,
+    repo_url: &str,
+    license_label: &str,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(format!("Source repo: {repo_label}"));
+        ui.hyperlink_to("Open repo / license details", repo_url);
+        ui.label(format!("License: {license_label}."));
+    });
 }
 
 fn native_menu_item(ui: &mut egui::Ui, label: &str) -> egui::Response {
@@ -515,23 +542,17 @@ fn run_unsigned_runtime_unblock_script(_paths: &AppPaths, runtime_dir: &Path) ->
 const WHISPER_MODELS: &[WhisperModelSpec] = &[
     WhisperModelSpec {
         label: "large-v3-turbo (recommended)",
-        file_name: "ggml-large-v3-turbo.bin",
-        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin?download=true",
+        file_name: "whisper-large-v3-turbo-GGML.bin",
+        url: "https://huggingface.co/openresearchtools/whisper-large-v3-turbo-GGML/resolve/main/whisper-large-v3-turbo-GGML.bin?download=true",
+        repo_label: "openresearchtools/whisper-large-v3-turbo-GGML",
+        repo_url: "https://huggingface.co/openresearchtools/whisper-large-v3-turbo-GGML",
     },
     WhisperModelSpec {
         label: "large-v3",
-        file_name: "ggml-large-v3.bin",
-        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin?download=true",
-    },
-    WhisperModelSpec {
-        label: "medium",
-        file_name: "ggml-medium.bin",
-        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin?download=true",
-    },
-    WhisperModelSpec {
-        label: "small",
-        file_name: "ggml-small.bin",
-        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin?download=true",
+        file_name: "whisper-large-v3-GGML.bin",
+        url: "https://huggingface.co/openresearchtools/whisper-large-v3-GGML/resolve/main/whisper-large-v3-GGML.bin?download=true",
+        repo_label: "openresearchtools/whisper-large-v3-GGML",
+        repo_url: "https://huggingface.co/openresearchtools/whisper-large-v3-GGML",
     },
 ];
 
@@ -550,6 +571,19 @@ const LIVE_TRANSCRIPTION_MODELS: &[LiveModelSpec] = &[
         label: "q8_0",
         file_name: "voxtral-mini-4b-realtime-q8_0.gguf",
         url: "https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602/resolve/main/voxtral-mini-4b-realtime-q8_0.gguf?download=true",
+    },
+];
+
+const CHAT_MODELS: &[ChatModelSpec] = &[
+    ChatModelSpec {
+        label: "Q4_K_M (recommended)",
+        file_name: "Qwen3.5-9B-Q4_K_M.gguf",
+        url: "https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf?download=true",
+    },
+    ChatModelSpec {
+        label: "Q8_0",
+        file_name: "Qwen3.5-9B-Q8_0.gguf",
+        url: "https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q8_0.gguf?download=true",
     },
 ];
 
@@ -815,6 +849,7 @@ enum UiMessage {
     DownloadStatus(Option<String>),
     WhisperInstalled(PathBuf),
     LiveModelInstalled(PathBuf),
+    ChatModelInstalled(PathBuf),
     DiarizationInstalled(PathBuf),
     LiveSessionStarted {
         input_device: String,
@@ -953,6 +988,7 @@ struct UiApp {
 
     whisper_models: usize,
     live_models: usize,
+    chat_models: usize,
     chat_source_path: Option<PathBuf>,
 
     audio_devices: Vec<AudioDeviceOption>,
@@ -1102,6 +1138,7 @@ impl UiApp {
 
         let whisper_models = select_whisper_model_index(&settings.whisper_model);
         let live_models = select_live_model_index(&settings.live_transcription_model);
+        let chat_models = select_chat_model_index(&settings.chat_model);
         let live_input_devices = enumerate_input_device_options(&runtime_dir);
         let selected_live_input_device =
             resolve_input_device_index(&live_input_devices, &settings.live_input_device);
@@ -1141,6 +1178,7 @@ impl UiApp {
             should_exit: false,
             whisper_models,
             live_models,
+            chat_models,
             chat_source_path: None,
             audio_devices,
             selected_audio_device,
@@ -2273,6 +2311,12 @@ impl UiApp {
                     ));
                     self.queue_save();
                 }
+                UiMessage::ChatModelInstalled(path) => {
+                    self.settings.chat_model = path.display().to_string();
+                    self.chat_models = select_chat_model_index(&self.settings.chat_model);
+                    self.push_status(&format!("Chat model installed: {}", path.display()));
+                    self.queue_save();
+                }
                 UiMessage::DiarizationInstalled(path) => {
                     self.settings.diarization_models_dir = path.display().to_string();
                     self.push_status(&format!(
@@ -2402,8 +2446,16 @@ impl UiApp {
             let resolved = path.display().to_string();
             if self.settings.chat_model != resolved {
                 self.settings.chat_model = resolved;
+                self.chat_models = select_chat_model_index(&self.settings.chat_model);
                 self.queue_save();
             }
+            return true;
+        }
+        if let Some(spec) = first_installed_chat_model(&self.paths) {
+            let path = chat_model_dest_path(&self.paths, spec.file_name);
+            self.settings.chat_model = path.display().to_string();
+            self.chat_models = select_chat_model_index(&self.settings.chat_model);
+            self.queue_save();
             return true;
         }
         false
@@ -2582,6 +2634,16 @@ impl UiApp {
                     "Not installed yet. Click Download to install this Whisper model.",
                 );
             }
+            let selected_whisper_spec = WHISPER_MODELS
+                .get(self.whisper_models)
+                .copied()
+                .unwrap_or(WHISPER_MODELS[0]);
+            model_repo_license_note(
+                ui,
+                selected_whisper_spec.repo_label,
+                selected_whisper_spec.repo_url,
+                "Apache-2.0",
+            );
         });
 
         engine_panel_frame().show(ui, |ui| {
@@ -2637,6 +2699,12 @@ impl UiApp {
             } else {
                 ui.label("Optional for the Live tab. Download a Voxtral model to enable microphone transcription.");
             }
+            model_repo_license_note(
+                ui,
+                "openresearchtools/Voxtral-Mini-4B-Realtime-2602",
+                LIVE_TRANSCRIPTION_REPO_URL,
+                "Apache-2.0",
+            );
         });
 
         engine_panel_frame().show(ui, |ui| {
@@ -2664,21 +2732,135 @@ impl UiApp {
                     format!("Missing required file: {}", missing.join(", ")),
                 );
             }
+            model_repo_license_note(
+                ui,
+                "openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf",
+                DIARIZATION_REPO,
+                "NVIDIA Open Model License",
+            );
         });
 
         if include_chat_model {
-            engine_panel_frame().show(ui, |ui| {
-                ui.heading("Chat Model (Optional)");
-                ui.horizontal(|ui| {
-                    ui.label("Chat model file:");
-                    ui.text_edit_singleline(&mut self.settings.chat_model);
-                    if ui.button("Browse").clicked() {
-                        self.do_pick_chat_model();
-                    }
-                });
-                ui.label("Optional for chat. Also required for Anonymise (beta).");
-            });
+            self.ui_chat_model_panel(ui, false);
         }
+    }
+
+    fn ui_chat_model_panel(&mut self, ui: &mut egui::Ui, show_thinking_toggle: bool) {
+        let current_chat_model = self.settings.chat_model.trim().to_string();
+        let chat_any_installed = has_any_installed_chat_model(&self.paths);
+        let selected_spec = CHAT_MODELS
+            .get(self.chat_models)
+            .copied()
+            .unwrap_or(CHAT_MODELS[0]);
+        let selected_managed_path = chat_model_dest_path(&self.paths, selected_spec.file_name);
+        let selected_managed_path_text = selected_managed_path.display().to_string();
+        let current_is_managed = is_managed_chat_model_path(&self.paths, current_chat_model.trim());
+
+        if selected_managed_path.exists()
+            && (current_chat_model.trim().is_empty()
+                || current_is_managed
+                || current_chat_model
+                    .trim()
+                    .eq_ignore_ascii_case(selected_managed_path_text.as_str()))
+            && self.settings.chat_model != selected_managed_path_text
+        {
+            self.settings.chat_model = selected_managed_path_text.clone();
+            self.queue_save();
+        }
+
+        engine_panel_frame().show(ui, |ui| {
+            ui.heading("Chat Model (Optional)");
+            ui.label(
+                "Use a local chat model for transcript Q&A and for Anonymise (beta).",
+            );
+            ui.horizontal(|ui| {
+                ui.label("Suggested Qwen model:");
+                egui::ComboBox::from_id_salt(("chat_model_suggested", show_thinking_toggle))
+                    .selected_text(chat_model_combo_label(&self.paths, &selected_spec))
+                    .show_ui(ui, |ui| {
+                        for (idx, spec) in CHAT_MODELS.iter().enumerate() {
+                            ui.selectable_value(
+                                &mut self.chat_models,
+                                idx,
+                                chat_model_combo_label(&self.paths, spec),
+                            );
+                        }
+                    });
+                let download_clicked = if chat_any_installed {
+                    accent_button(ui, "Download selected").clicked()
+                } else {
+                    secondary_button(ui, "Download selected").clicked()
+                };
+                if download_clicked {
+                    self.do_download_chat_model();
+                }
+                if ui.button("Open Qwen folder").clicked() {
+                    let _ = open::that(self.paths.chat_models_dir.clone());
+                }
+            });
+            if selected_managed_path.exists() {
+                ui.label(format!(
+                    "Selected suggested model is installed at {}.",
+                    selected_managed_path.display()
+                ));
+            } else {
+                ui.label(
+                    "Download installs the selected GGUF into the shared app data model store.",
+                );
+            }
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Manual chat model file:");
+                ui.text_edit_singleline(&mut self.settings.chat_model);
+                if ui.button("Browse").clicked() {
+                    self.do_pick_chat_model();
+                }
+            });
+            ui.label(
+                "Manual chat model paths stay where they already live. They are not copied into the managed model store.",
+            );
+
+            if current_chat_model.trim().is_empty() {
+                ui.label("No chat model selected yet.");
+            } else if Path::new(current_chat_model.trim()).exists() {
+                if current_is_managed {
+                    ui.label("Current chat model is using the managed Qwen repo folder.");
+                } else {
+                    ui.label("Current chat model is using a manual external path.");
+                }
+            } else {
+                ui.colored_label(
+                    egui::Color32::from_rgb(160, 25, 25),
+                    "Current chat model path does not exist yet.",
+                );
+            }
+
+            if show_thinking_toggle {
+                ui.separator();
+                ui.checkbox(
+                    &mut self.settings.chat_allow_thinking,
+                    "Allow thinking when supported",
+                );
+                ui.label(
+                    "Anonymise always runs with thinking off, even if this checkbox is enabled.",
+                );
+            }
+
+            ui.separator();
+            ui.label(
+                "We are not affiliated with Qwen. This recommendation is not endorsed by the model developers. We recommend this model because it is a capable small open source chat model.",
+            );
+            model_repo_license_note(
+                ui,
+                "openresearchtools/Qwen3.5-9B-GGUF",
+                CHAT_REPO_URL,
+                "Apache-2.0",
+            );
+            ui.label(
+                "If you use a manual external chat model instead, check that model's own repository and license terms separately.",
+            );
+        });
     }
 
     fn ui_runtime_parameters_panel(&mut self, ui: &mut egui::Ui) {
@@ -2768,6 +2950,7 @@ impl UiApp {
                 .pick_file()
         }) {
             self.settings.chat_model = path.display().to_string();
+            self.chat_models = select_chat_model_index(&self.settings.chat_model);
             self.queue_save();
         }
     }
@@ -2951,6 +3134,7 @@ impl UiApp {
         let prompt = build_anonymise_prompt(&source_text, &selected_kinds);
         settings.chat_prompt = prompt;
         settings.chat_context_file.clear();
+        settings.chat_allow_thinking = false;
         std::thread::spawn(move || match run_chat(settings) {
             Ok(answer) => {
                 let _ = tx.send(UiMessage::AnonymiseDone {
@@ -3113,6 +3297,22 @@ impl UiApp {
             dest,
         );
         self.push_status(&format!("Downloading realtime model {}", spec.label));
+    }
+
+    fn do_download_chat_model(&mut self) {
+        let spec = CHAT_MODELS
+            .get(self.chat_models)
+            .copied()
+            .unwrap_or(CHAT_MODELS[0]);
+        let dest = chat_model_dest_path(&self.paths, spec.file_name);
+        start_chat_model_download(
+            self.tx.clone(),
+            self.runtime_state.clone(),
+            spec.label.to_string(),
+            spec.url.to_string(),
+            dest,
+        );
+        self.push_status(&format!("Downloading chat model {}", spec.label));
     }
 
     fn do_download_diarization(&mut self) {
@@ -5096,19 +5296,7 @@ impl UiApp {
             .default_size([820.0, 420.0])
             .show(ctx, |ui| {
                 ui.label("Choose the chat model and response settings. If you are unsure, keep defaults.");
-                engine_panel_frame().show(ui, |ui| {
-                    ui.heading("Model");
-                    ui.horizontal(|ui| {
-                        ui.label("Chat model file:");
-                        ui.text_edit_singleline(&mut self.settings.chat_model);
-                        if ui.button("Browse").clicked() {
-                            self.do_pick_chat_model();
-                        }
-                    });
-                    if ui.button("Open models folder").clicked() {
-                        let _ = open::that(self.paths.models_dir.clone());
-                    }
-                });
+                self.ui_chat_model_panel(ui, true);
                 engine_panel_frame().show(ui, |ui| {
                     ui.heading("Generation");
                     ui.horizontal(|ui| {
@@ -5685,6 +5873,21 @@ fn select_live_model_index(live_model: &str) -> usize {
             .and_then(|name| name.to_str())
             .unwrap_or(live_model);
         LIVE_TRANSCRIPTION_MODELS
+            .iter()
+            .position(|spec| spec.file_name.eq_ignore_ascii_case(file_name))
+            .unwrap_or(0)
+    }
+}
+
+fn select_chat_model_index(chat_model: &str) -> usize {
+    if chat_model.trim().is_empty() {
+        0
+    } else {
+        let file_name = Path::new(chat_model)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(chat_model);
+        CHAT_MODELS
             .iter()
             .position(|spec| spec.file_name.eq_ignore_ascii_case(file_name))
             .unwrap_or(0)

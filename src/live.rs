@@ -47,9 +47,11 @@ pub(crate) fn enumerate_input_device_options(runtime_dir: &Path) -> Vec<LiveInpu
     };
 
     devices.sort_by(|a, b| {
-        b.is_default
-            .cmp(&a.is_default)
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+        b.is_default.cmp(&a.is_default).then_with(|| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        })
     });
 
     let mut out = vec![default_option];
@@ -114,11 +116,13 @@ pub(crate) fn start_live_capture(
     let recording_path = paths
         .live_sessions_dir
         .join(format!("{session_name}.clean.wav"));
-    let transcript_path = paths.live_sessions_dir.join(if settings.live_diarization_enabled {
-        format!("{session_name}.transcript.md")
-    } else {
-        format!("{session_name}.transcript.txt")
-    });
+    let transcript_path = paths
+        .live_sessions_dir
+        .join(if settings.live_diarization_enabled {
+            format!("{session_name}.transcript.md")
+        } else {
+            format!("{session_name}.transcript.txt")
+        });
     let input_label = if settings.live_input_device.trim().is_empty() {
         "Default input".to_string()
     } else {
@@ -140,8 +144,9 @@ pub(crate) fn start_live_capture(
         Some(settings.live_input_device.trim().to_string())
     };
     let worker_live_model_path = live_model_path.display().to_string();
-    let worker_diarization_model_path =
-        diarization_model_path.as_ref().map(|path| path.display().to_string());
+    let worker_diarization_model_path = diarization_model_path
+        .as_ref()
+        .map(|path| path.display().to_string());
     let worker_backend_name = backend_name.clone();
     let worker_live_diarization_enabled = settings.live_diarization_enabled;
     std::thread::spawn(move || {
@@ -241,9 +246,13 @@ fn live_worker(
     let live = api.create_live(&live_config)?;
     live.start()?;
 
-    let output_paths = live
-        .output_paths()
-        .unwrap_or_else(|_| fallback_output_paths(&live_config, &fallback_recording_path, &fallback_transcript_path));
+    let output_paths = live.output_paths().unwrap_or_else(|_| {
+        fallback_output_paths(
+            &live_config,
+            &fallback_recording_path,
+            &fallback_transcript_path,
+        )
+    });
     let recording_path = if output_paths.cleaned_wav_path.as_os_str().is_empty() {
         fallback_recording_path
     } else {

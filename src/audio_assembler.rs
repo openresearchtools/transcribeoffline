@@ -175,7 +175,10 @@ fn next_piece_looks_like_continuation(next_text: &str) -> bool {
     first_token(next_text) == "I"
 }
 
-fn split_piece_at(piece: &AssignedPiece, split_index: usize) -> Option<(AssignedPiece, AssignedPiece)> {
+fn split_piece_at(
+    piece: &AssignedPiece,
+    split_index: usize,
+) -> Option<(AssignedPiece, AssignedPiece)> {
     if split_index == 0 || split_index >= piece.text.len() {
         return None;
     }

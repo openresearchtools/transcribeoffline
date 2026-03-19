@@ -200,12 +200,20 @@ fn run_chat(settings: AppSettings) -> Result<String> {
         }
     }
     let shared = shared_bridge_params(&settings);
+    let (reasoning, reasoning_budget, reasoning_format) = if settings.chat_allow_thinking {
+        (Some("on".to_string()), -1, Some("deepseek".to_string()))
+    } else {
+        (Some("off".to_string()), REASONING_BUDGET_UNSET, None)
+    };
     api.run_chat(
         &shared,
         &ChatRunParams {
             model_path: settings.chat_model,
             prompt,
             n_predict: 10_000,
+            reasoning,
+            reasoning_budget,
+            reasoning_format,
         },
     )
 }
@@ -246,11 +254,15 @@ fn whisper_label_from_path(path: &Path) -> Option<&'static str> {
 }
 
 fn whisper_model_dest_path(paths: &AppPaths, file_name: &str) -> PathBuf {
-    paths.whisper_models_dir.join(file_name)
+    whisper_model_repo_dir(paths, file_name).join(file_name)
 }
 
 fn live_model_dest_path(paths: &AppPaths, file_name: &str) -> PathBuf {
     paths.live_models_dir.join(file_name)
+}
+
+fn chat_model_dest_path(paths: &AppPaths, file_name: &str) -> PathBuf {
+    paths.chat_models_dir.join(file_name)
 }
 
 pub(crate) fn resolve_chat_model_path_from_store(
@@ -313,6 +325,26 @@ fn live_model_combo_label(paths: &AppPaths, spec: &LiveModelSpec) -> String {
     }
 }
 
+fn chat_model_combo_label(paths: &AppPaths, spec: &ChatModelSpec) -> String {
+    let model_path = chat_model_dest_path(paths, spec.file_name);
+    if model_path.exists() {
+        format!("{} [installed]", spec.label)
+    } else {
+        format!("{} [not installed]", spec.label)
+    }
+}
+
+fn is_managed_chat_model_path(paths: &AppPaths, raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    Path::new(trimmed)
+        .parent()
+        .map(|parent| parent == paths.chat_models_dir.as_path())
+        .unwrap_or(false)
+}
+
 fn missing_diarization_files(dir: &Path) -> Vec<&'static str> {
     if dir.join(SORTFORMER_MODEL_FILE).exists() {
         Vec::new()
@@ -339,6 +371,16 @@ fn first_installed_live_model(paths: &AppPaths) -> Option<&'static LiveModelSpec
 
 fn has_any_installed_live_model(paths: &AppPaths) -> bool {
     first_installed_live_model(paths).is_some()
+}
+
+fn first_installed_chat_model(paths: &AppPaths) -> Option<&'static ChatModelSpec> {
+    CHAT_MODELS
+        .iter()
+        .find(|spec| chat_model_dest_path(paths, spec.file_name).exists())
+}
+
+fn has_any_installed_chat_model(paths: &AppPaths) -> bool {
+    first_installed_chat_model(paths).is_some()
 }
 
 fn backend_priority_for_platform(backend_norm: &str) -> i32 {
@@ -730,6 +772,62 @@ fn start_live_model_download(
                 let _ = tx.send(UiMessage::Status(
                     "Realtime model download failed.".to_string(),
                 ));
+            }
+        }
+        let _ = tx.send(UiMessage::Refresh);
+        drop(runtime_state);
+    });
+}
+
+fn start_chat_model_download(
+    tx: std::sync::mpsc::Sender<UiMessage>,
+    runtime_state: Arc<Mutex<RuntimeState>>,
+    display_name: String,
+    url: String,
+    dest: PathBuf,
+) {
+    let _ = tx.send(UiMessage::Log(format!(
+        "Starting download: chat model '{display_name}' -> {}",
+        dest.display()
+    )));
+    let _ = tx.send(UiMessage::Status(format!(
+        "Downloading chat model {display_name}..."
+    )));
+
+    std::thread::spawn(move || {
+        let tx_progress = tx.clone();
+        let progress_label = display_name.clone();
+        let result = download_file_with_progress(&url, &dest, move |done, total, speed| {
+            let status = match total {
+                Some(total_bytes) if total_bytes > 0 => format!(
+                    "Downloading {}: {} / {} at {}/s",
+                    progress_label,
+                    format_size(done),
+                    format_size(total_bytes),
+                    format_size(speed as u64)
+                ),
+                _ => format!(
+                    "Downloading {}: {} at {}/s",
+                    progress_label,
+                    format_size(done),
+                    format_size(speed as u64)
+                ),
+            };
+            let _ = tx_progress.send(UiMessage::DownloadStatus(Some(status)));
+        });
+
+        let _ = tx.send(UiMessage::DownloadStatus(None));
+        match result {
+            Ok(_) => {
+                let _ = tx.send(UiMessage::ChatModelInstalled(dest.clone()));
+                let _ = tx.send(UiMessage::Status(format!("Installed chat model {display_name}")));
+            }
+            Err(e) => {
+                let _ = tx.send(UiMessage::Log(format!(
+                    "Chat model download failed for {}: {}",
+                    display_name, e
+                )));
+                let _ = tx.send(UiMessage::Status("Chat model download failed.".to_string()));
             }
         }
         let _ = tx.send(UiMessage::Refresh);

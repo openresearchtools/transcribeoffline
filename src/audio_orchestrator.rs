@@ -102,8 +102,12 @@ impl DiarizedTranscriptOrchestrator {
         }
 
         if changed && !self.active_spans().is_empty() && !self.pieces.is_empty() {
-            self.turns =
-                assemble_turns_with_words(self.active_spans(), &self.pieces, &self.words, &self.options);
+            self.turns = assemble_turns_with_words(
+                self.active_spans(),
+                &self.pieces,
+                &self.words,
+                &self.options,
+            );
             self.markdown = turns_to_markdown(&self.turns, self.sample_rate_hz);
         }
 

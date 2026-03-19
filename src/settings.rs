@@ -11,7 +11,9 @@ pub struct AppPaths {
     pub data_dir: PathBuf,
     pub models_dir: PathBuf,
     pub whisper_models_dir: PathBuf,
+    pub whisper_large_v3_models_dir: PathBuf,
     pub live_models_dir: PathBuf,
+    pub chat_models_dir: PathBuf,
     pub diarization_models_dir: PathBuf,
     pub live_sessions_dir: PathBuf,
     pub settings_yaml: PathBuf,
@@ -45,6 +47,7 @@ pub struct AppSettings {
     pub ffmpeg_convert: bool,
     pub whisper_word_time_offset_sec: String,
     pub chat_model: String,
+    pub chat_allow_thinking: bool,
     pub chat_prompt: String,
     pub chat_context_file: String,
     pub devices: String,
@@ -86,6 +89,7 @@ impl Default for AppSettings {
             ffmpeg_convert: true,
             whisper_word_time_offset_sec: "0.73".to_string(),
             chat_model: String::new(),
+            chat_allow_thinking: false,
             chat_prompt: String::new(),
             chat_context_file: String::new(),
             devices: String::new(),
@@ -214,11 +218,13 @@ pub fn default_models_root_dir() -> PathBuf {
     PathBuf::from("models")
 }
 
-pub const DEFAULT_WHISPER_MODEL_FILE: &str = "ggml-large-v3-turbo.bin";
+pub const DEFAULT_WHISPER_MODEL_FILE: &str = "whisper-large-v3-turbo-GGML.bin";
 pub const DEFAULT_LIVE_TRANSCRIPTION_MODEL_FILE: &str = "voxtral-mini-4b-realtime-q4_0.gguf";
-pub const WHISPER_REPO_DIR_NAME: &str = "ggerganov__whisper.cpp";
+pub const WHISPER_TURBO_REPO_DIR_NAME: &str = "openresearchtools__whisper-large-v3-turbo-GGML";
+pub const WHISPER_LARGE_V3_REPO_DIR_NAME: &str = "openresearchtools__whisper-large-v3-GGML";
 pub const LIVE_TRANSCRIPTION_REPO_DIR_NAME: &str =
     "openresearchtools__Voxtral-Mini-4B-Realtime-2602";
+pub const CHAT_REPO_DIR_NAME: &str = "openresearchtools__Qwen3.5-9B-GGUF";
 pub const DIARIZATION_REPO_DIR_NAME: &str =
     "openresearchtools__diar_streaming_sortformer_4spk-v2.1-gguf";
 
@@ -269,8 +275,46 @@ fn normalize_repo_managed_dir_path(raw: &str, repo_dir: &Path, legacy_dir_name: 
     trimmed.to_string()
 }
 
+pub fn whisper_model_repo_dir(paths: &AppPaths, file_name: &str) -> PathBuf {
+    if file_name.eq_ignore_ascii_case("whisper-large-v3-GGML.bin") {
+        return paths.whisper_large_v3_models_dir.clone();
+    }
+    paths.whisper_models_dir.clone()
+}
+
+fn normalize_whisper_model_path(raw: &str, paths: &AppPaths) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let path = PathBuf::from(trimmed);
+    let Some(file_name) = path.file_name() else {
+        return trimmed.to_string();
+    };
+    let file_name = file_name.to_string_lossy();
+    let repo_dir = whisper_model_repo_dir(paths, &file_name);
+    let repo_path = repo_dir.join(file_name.as_ref());
+
+    if repo_path.exists() {
+        return repo_path.display().to_string();
+    }
+
+    let parent_matches = path.parent().map(|parent| {
+        path_file_name_eq(parent, "Whisper")
+            || path_file_name_eq(parent, "ggerganov__whisper.cpp")
+            || path_file_name_eq(parent, WHISPER_TURBO_REPO_DIR_NAME)
+            || path_file_name_eq(parent, WHISPER_LARGE_V3_REPO_DIR_NAME)
+    });
+    if parent_matches.unwrap_or(false) {
+        return repo_path.display().to_string();
+    }
+
+    trimmed.to_string()
+}
+
 pub fn default_whisper_model_path(paths: &AppPaths) -> PathBuf {
-    paths.whisper_models_dir.join(DEFAULT_WHISPER_MODEL_FILE)
+    whisper_model_repo_dir(paths, DEFAULT_WHISPER_MODEL_FILE).join(DEFAULT_WHISPER_MODEL_FILE)
 }
 
 pub fn default_live_transcription_model_path(paths: &AppPaths) -> PathBuf {
@@ -289,8 +333,10 @@ pub fn app_paths() -> Result<AppPaths> {
     let config_dir = dirs.config_dir().to_path_buf();
     let data_dir = dirs.data_dir().to_path_buf();
     let models_dir = default_models_root_dir();
-    let whisper_models_dir = models_dir.join(WHISPER_REPO_DIR_NAME);
+    let whisper_models_dir = models_dir.join(WHISPER_TURBO_REPO_DIR_NAME);
+    let whisper_large_v3_models_dir = models_dir.join(WHISPER_LARGE_V3_REPO_DIR_NAME);
     let live_models_dir = models_dir.join(LIVE_TRANSCRIPTION_REPO_DIR_NAME);
+    let chat_models_dir = models_dir.join(CHAT_REPO_DIR_NAME);
     let diarization_models_dir = models_dir.join(DIARIZATION_REPO_DIR_NAME);
     let live_sessions_dir = data_dir.join("live-sessions");
     Ok(AppPaths {
@@ -300,7 +346,9 @@ pub fn app_paths() -> Result<AppPaths> {
         data_dir,
         models_dir,
         whisper_models_dir,
+        whisper_large_v3_models_dir,
         live_models_dir,
+        chat_models_dir,
         diarization_models_dir,
         live_sessions_dir,
     })
@@ -331,10 +379,22 @@ pub fn ensure_dirs(paths: &AppPaths) -> Result<()> {
             paths.whisper_models_dir.display()
         )
     })?;
+    fs::create_dir_all(&paths.whisper_large_v3_models_dir).with_context(|| {
+        format!(
+            "failed to create whisper models directory '{}'",
+            paths.whisper_large_v3_models_dir.display()
+        )
+    })?;
     fs::create_dir_all(&paths.live_models_dir).with_context(|| {
         format!(
             "failed to create realtime models directory '{}'",
             paths.live_models_dir.display()
+        )
+    })?;
+    fs::create_dir_all(&paths.chat_models_dir).with_context(|| {
+        format!(
+            "failed to create chat models directory '{}'",
+            paths.chat_models_dir.display()
         )
     })?;
     fs::create_dir_all(&paths.diarization_models_dir).with_context(|| {
@@ -385,8 +445,7 @@ pub fn load_settings(paths: &AppPaths) -> Result<AppSettings> {
     let original_live_model = parsed.live_transcription_model.clone();
     let original_diarization_dir = parsed.diarization_models_dir.clone();
     parsed.runtime_dir = normalize_runtime_dir(parsed.runtime_dir);
-    parsed.whisper_model =
-        normalize_repo_managed_file_path(&parsed.whisper_model, &paths.whisper_models_dir, "Whisper");
+    parsed.whisper_model = normalize_whisper_model_path(&parsed.whisper_model, paths);
     parsed.live_transcription_model = normalize_repo_managed_file_path(
         &parsed.live_transcription_model,
         &paths.live_models_dir,
