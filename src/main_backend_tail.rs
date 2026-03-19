@@ -1,4 +1,7 @@
-fn run_transcription_with_progress<F>(settings: AppSettings, mut progress: F) -> Result<TranscriptionResult>
+fn run_transcription_with_progress<F>(
+    settings: AppSettings,
+    mut progress: F,
+) -> Result<TranscriptionResult>
 where
     F: FnMut(String),
 {
@@ -27,25 +30,7 @@ where
 
     let mode_norm = settings.mode.trim().to_ascii_lowercase();
     let mut custom_value = settings.custom_mode.trim().to_string();
-    if mode_norm == "transcript" {
-        let sc = settings.speaker_count.trim();
-        if !sc.is_empty() {
-            if sc.eq_ignore_ascii_case("auto") || sc.eq_ignore_ascii_case("default") {
-                custom_value = "auto".to_string();
-            } else {
-                let parsed = sc.parse::<u32>().ok();
-                if let Some(v) = parsed {
-                    if v > 0 {
-                        custom_value = v.to_string();
-                    } else {
-                        bail!("speaker count must be a positive integer or 'auto'");
-                    }
-                } else {
-                    bail!("speaker count must be a positive integer or 'auto'");
-                }
-            }
-        }
-    } else if mode_norm == "subtitle" {
+    if mode_norm == "subtitle" {
         let subtitle_custom = settings.subtitle_custom_mode.trim();
         if !subtitle_custom.is_empty() {
             custom_value = subtitle_custom.to_string();
@@ -81,9 +66,17 @@ where
         if settings.diarization_models_dir.trim().is_empty() {
             bail!("diarization is enabled but diarization models dir is empty");
         }
-        metadata["diarization_models_dir"] = json!(settings.diarization_models_dir);
-        metadata["diarization_backend"] = json!("native_cpp");
-        metadata["speaker_count"] = json!(settings.speaker_count);
+        let diarization_model_path =
+            PathBuf::from(settings.diarization_models_dir.trim()).join(SORTFORMER_MODEL_FILE);
+        if !diarization_model_path.exists() {
+            bail!(
+                "diarization model not found: '{}'",
+                diarization_model_path.display()
+            );
+        }
+        metadata["diarization_model_path"] = json!(diarization_model_path.display().to_string());
+        metadata["diarization_backend"] = json!("sortformer");
+        metadata["diarization_feed_ms"] = json!(10_800_001.0);
     }
     if let Ok(v) = settings.whisper_word_time_offset_sec.trim().parse::<f64>() {
         metadata["whisper_word_time_offset_sec"] = json!(v);
@@ -122,14 +115,11 @@ where
     let audio_bytes_len = audio_bytes.len();
     let timing_read_audio_ms = read_audio_started.elapsed().as_millis();
     let audio_format = infer_audio_format(&audio_path);
-    let preprocess_note =
-        "Sending raw bytes; bridge-side FFmpeg conversion enabled (vendored runtime).".to_string();
     let shared = shared_bridge_params(&settings);
+    metadata["transport"] = json!("audio_raw_bytes");
     if diarization_enabled {
         progress("bridge pipeline stage: whisper transcription (starting)".to_string());
-        progress("bridge pipeline stage: native diarization (queued)".to_string());
-        progress("bridge pipeline stage: speaker embeddings (queued)".to_string());
-        progress("bridge pipeline stage: transcript alignment (queued)".to_string());
+        progress("bridge pipeline stage: native diarization (starting)".to_string());
         progress("running whisper transcription + diarization".to_string());
     } else {
         progress("bridge pipeline stage: whisper transcription (starting)".to_string());
@@ -159,6 +149,9 @@ where
     let output_text = fs::read_to_string(&output_path)
         .with_context(|| format!("failed to read output '{}'", output_path.display()))?;
     let timing_read_output_ms = read_output_started.elapsed().as_millis();
+    let preprocess_note =
+        "Sending raw bytes; bridge-side FFmpeg conversion enabled (vendored runtime)."
+            .to_string();
     let timing_total_ms = started_at.elapsed().as_millis();
 
     Ok(TranscriptionResult {
@@ -256,6 +249,52 @@ fn whisper_model_dest_path(paths: &AppPaths, file_name: &str) -> PathBuf {
     paths.whisper_models_dir.join(file_name)
 }
 
+fn live_model_dest_path(paths: &AppPaths, file_name: &str) -> PathBuf {
+    paths.live_models_dir.join(file_name)
+}
+
+pub(crate) fn resolve_chat_model_path_from_store(
+    paths: &AppPaths,
+    configured_path: &str,
+) -> Option<PathBuf> {
+    let trimmed = configured_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let configured = PathBuf::from(trimmed);
+    if configured.exists() {
+        return Some(configured);
+    }
+
+    let file_name = configured.file_name()?;
+    let read_dir = fs::read_dir(&paths.models_dir).ok()?;
+    for entry in read_dir.flatten() {
+        let repo_dir = entry.path();
+        if !repo_dir.is_dir() {
+            continue;
+        }
+        let candidate = repo_dir.join(file_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+pub(crate) fn sortformer_model_path_from_settings(
+    paths: &AppPaths,
+    settings: &AppSettings,
+) -> PathBuf {
+    let dir = if settings.diarization_models_dir.trim().is_empty() {
+        default_diarization_models_dir(paths)
+    } else {
+        PathBuf::from(settings.diarization_models_dir.trim())
+    };
+    dir.join(SORTFORMER_MODEL_FILE)
+}
+
 fn whisper_combo_label(paths: &AppPaths, spec: &WhisperModelSpec) -> String {
     let model_path = whisper_model_dest_path(paths, spec.file_name);
     if model_path.exists() {
@@ -265,12 +304,21 @@ fn whisper_combo_label(paths: &AppPaths, spec: &WhisperModelSpec) -> String {
     }
 }
 
+fn live_model_combo_label(paths: &AppPaths, spec: &LiveModelSpec) -> String {
+    let model_path = live_model_dest_path(paths, spec.file_name);
+    if model_path.exists() {
+        format!("{} [installed]", spec.label)
+    } else {
+        format!("{} [not installed]", spec.label)
+    }
+}
+
 fn missing_diarization_files(dir: &Path) -> Vec<&'static str> {
-    DIARIZATION_FILES
-        .iter()
-        .map(|(name, _)| *name)
-        .filter(|name| !dir.join(name).exists())
-        .collect::<Vec<_>>()
+    if dir.join(SORTFORMER_MODEL_FILE).exists() {
+        Vec::new()
+    } else {
+        vec![SORTFORMER_MODEL_FILE]
+    }
 }
 
 fn first_installed_whisper_model(paths: &AppPaths) -> Option<&'static WhisperModelSpec> {
@@ -281,6 +329,16 @@ fn first_installed_whisper_model(paths: &AppPaths) -> Option<&'static WhisperMod
 
 fn has_any_installed_whisper_model(paths: &AppPaths) -> bool {
     first_installed_whisper_model(paths).is_some()
+}
+
+fn first_installed_live_model(paths: &AppPaths) -> Option<&'static LiveModelSpec> {
+    LIVE_TRANSCRIPTION_MODELS
+        .iter()
+        .find(|spec| live_model_dest_path(paths, spec.file_name).exists())
+}
+
+fn has_any_installed_live_model(paths: &AppPaths) -> bool {
+    first_installed_live_model(paths).is_some()
 }
 
 fn backend_priority_for_platform(backend_norm: &str) -> i32 {
@@ -427,7 +485,10 @@ fn enumerate_audio_device_options(runtime_dir: &Path) -> Vec<AudioDeviceOption> 
     options
 }
 
-fn resolve_audio_device_label(options: &[AudioDeviceOption], selected_gpu_index: Option<i32>) -> String {
+fn resolve_audio_device_label(
+    options: &[AudioDeviceOption],
+    selected_gpu_index: Option<i32>,
+) -> String {
     let Some(selected_gpu_index) = selected_gpu_index else {
         return AUDIO_DEVICE_CPU_LABEL.to_string();
     };
@@ -616,6 +677,66 @@ fn start_model_download(
     });
 }
 
+fn start_live_model_download(
+    tx: std::sync::mpsc::Sender<UiMessage>,
+    runtime_state: Arc<Mutex<RuntimeState>>,
+    display_name: String,
+    url: String,
+    dest: PathBuf,
+) {
+    let _ = tx.send(UiMessage::Log(format!(
+        "Starting download: realtime model '{display_name}' -> {}",
+        dest.display()
+    )));
+    let _ = tx.send(UiMessage::Status(format!(
+        "Downloading realtime model {display_name}..."
+    )));
+
+    std::thread::spawn(move || {
+        let tx_progress = tx.clone();
+        let progress_label = display_name.clone();
+        let result = download_file_with_progress(&url, &dest, move |done, total, speed| {
+            let status = match total {
+                Some(total_bytes) if total_bytes > 0 => format!(
+                    "Downloading {}: {} / {} at {}/s",
+                    progress_label,
+                    format_size(done),
+                    format_size(total_bytes),
+                    format_size(speed as u64)
+                ),
+                _ => format!(
+                    "Downloading {}: {} at {}/s",
+                    progress_label,
+                    format_size(done),
+                    format_size(speed as u64)
+                ),
+            };
+            let _ = tx_progress.send(UiMessage::DownloadStatus(Some(status)));
+        });
+
+        let _ = tx.send(UiMessage::DownloadStatus(None));
+        match result {
+            Ok(_) => {
+                let _ = tx.send(UiMessage::LiveModelInstalled(dest.clone()));
+                let _ = tx.send(UiMessage::Status(format!(
+                    "Installed realtime model {display_name}"
+                )));
+            }
+            Err(e) => {
+                let _ = tx.send(UiMessage::Log(format!(
+                    "Realtime model download failed for {}: {}",
+                    display_name, e
+                )));
+                let _ = tx.send(UiMessage::Status(
+                    "Realtime model download failed.".to_string(),
+                ));
+            }
+        }
+        let _ = tx.send(UiMessage::Refresh);
+        drop(runtime_state);
+    });
+}
+
 fn start_diarization_download(
     tx: std::sync::mpsc::Sender<UiMessage>,
     runtime_state: Arc<Mutex<RuntimeState>>,
@@ -626,56 +747,41 @@ fn start_diarization_download(
         dest_dir.display()
     )));
     let _ = tx.send(UiMessage::Status(
-        "Downloading diarization models...".to_string(),
+        "Downloading Sortformer diarization model...".to_string(),
     ));
 
     std::thread::spawn(move || {
-        let mut result: Result<()> = Ok(());
-        for (index, (file_name, url)) in DIARIZATION_FILES.iter().enumerate() {
-            let dest = dest_dir.join(file_name);
-            let tx_progress = tx.clone();
-            let file_label = (*file_name).to_string();
-            let current = index + 1;
-            let total_files = DIARIZATION_FILES.len();
-            let this_result = download_file_with_progress(url, &dest, move |done, total, speed| {
+        let dest = dest_dir.join(SORTFORMER_MODEL_FILE);
+        let tx_progress = tx.clone();
+        let result =
+            download_file_with_progress(DIARIZATION_MODEL_URL, &dest, move |done, total, speed| {
                 let status = match total {
                     Some(total_bytes) if total_bytes > 0 => format!(
-                        "Downloading diarization {}/{} ({}): {} / {} at {}/s",
-                        current,
-                        total_files,
-                        file_label,
+                        "Downloading Sortformer diarization model: {} / {} at {}/s",
                         format_size(done),
                         format_size(total_bytes),
                         format_size(speed as u64)
                     ),
                     _ => format!(
-                        "Downloading diarization {}/{} ({}): {} at {}/s",
-                        current,
-                        total_files,
-                        file_label,
+                        "Downloading Sortformer diarization model: {} at {}/s",
                         format_size(done),
                         format_size(speed as u64)
                     ),
                 };
                 let _ = tx_progress.send(UiMessage::DownloadStatus(Some(status)));
             });
-            if let Err(e) = this_result {
-                result = Err(e);
-                break;
-            }
-        }
 
         let _ = tx.send(UiMessage::DownloadStatus(None));
         match result {
             Ok(_) => {
                 let _ = tx.send(UiMessage::DiarizationInstalled(dest_dir.clone()));
                 let _ = tx.send(UiMessage::Status(
-                    "Diarization models installed.".to_string(),
+                    "Sortformer diarization model installed.".to_string(),
                 ));
             }
             Err(e) => {
                 let _ = tx.send(UiMessage::Log(format!(
-                    "Diarization model download failed: {e}"
+                    "Sortformer diarization model download failed: {e}"
                 )));
                 let _ = tx.send(UiMessage::Status(
                     "Diarization download failed.".to_string(),
@@ -883,7 +989,8 @@ fn resolve_runtime_dir(preferred: &Path) -> PathBuf {
 fn runtime_dir_candidates(preferred: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let fallback = crate::settings::default_runtime_dir();
-    let preferred_mapped = crate::settings::normalize_runtime_dir_alias(&preferred.to_string_lossy());
+    let preferred_mapped =
+        crate::settings::normalize_runtime_dir_alias(&preferred.to_string_lossy());
 
     if !preferred_mapped.trim().is_empty() {
         out.push(PathBuf::from(preferred_mapped));
@@ -1016,8 +1123,7 @@ fn default_runtime_threads() -> Option<i32> {
 }
 
 fn normalize_playback_path(path: &Path) -> PathBuf {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn playback_paths_equal(a: &Path, b: &Path) -> bool {
@@ -1240,7 +1346,12 @@ fn decode_audio_to_stereo_f32(audio_path: &Path, dst_rate: u32) -> Result<Vec<f3
             &FormatOptions::default(),
             &MetadataOptions::default(),
         )
-        .with_context(|| format!("unsupported or unrecognized media '{}'", audio_path.display()))?;
+        .with_context(|| {
+            format!(
+                "unsupported or unrecognized media '{}'",
+                audio_path.display()
+            )
+        })?;
     let mut format = probed.format;
     let track = format
         .default_track()
@@ -1332,9 +1443,8 @@ fn resample_stereo_linear(samples_stereo: &[f32], src_rate: u32, dst_rate: u32) 
     if in_frames == 0 {
         return Vec::new();
     }
-    let out_frames = (((in_frames as f64) * (dst_rate as f64) / (src_rate as f64)).round()
-        as usize)
-        .max(1);
+    let out_frames =
+        (((in_frames as f64) * (dst_rate as f64) / (src_rate as f64)).round() as usize).max(1);
     let mut out = Vec::with_capacity(out_frames * 2);
 
     for i in 0..out_frames {

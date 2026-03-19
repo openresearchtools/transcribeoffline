@@ -1,6 +1,6 @@
 ﻿{
   "sources": [
-    "https://github.com/openresearchtools/engine/releases/download/v1.5/engine-manifest.json",
+    "https://github.com/openresearchtools/engine/releases/download/v1.9/engine-manifest.json",
     "https://github.com/openresearchtools/engine/releases/latest/download/engine-manifest.json"
   ]
 }

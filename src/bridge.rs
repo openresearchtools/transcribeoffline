@@ -14,6 +14,11 @@ pub struct llama_server_bridge {
 }
 
 #[repr(C)]
+pub struct llama_server_bridge_audio_session {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
 #[derive(Copy, Clone)]
 pub struct llama_server_bridge_params {
     pub model_path: *const c_char,
@@ -73,6 +78,49 @@ pub struct llama_server_bridge_audio_raw_request {
 
 #[repr(C)]
 #[derive(Copy, Clone)]
+pub struct llama_server_bridge_realtime_params {
+    pub backend_kind: i32,
+    pub model_path: *const c_char,
+    pub backend_name: *const c_char,
+    pub expected_sample_rate_hz: u32,
+    pub audio_ring_capacity_samples: u32,
+    pub capture_debug: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct llama_server_bridge_audio_session_params {
+    pub expected_input_sample_rate_hz: u32,
+    pub expected_input_channels: u32,
+    pub max_buffered_audio_samples: u32,
+    pub event_queue_capacity: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct llama_server_bridge_audio_transcription_params {
+    pub bridge_params: llama_server_bridge_params,
+    pub metadata_json: *const c_char,
+    pub mode: i32,
+    pub realtime_params: llama_server_bridge_realtime_params,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct llama_server_bridge_audio_event {
+    pub seq_no: u64,
+    pub kind: i32,
+    pub flags: u32,
+    pub start_sample: u64,
+    pub end_sample: u64,
+    pub speaker_id: i32,
+    pub item_id: u32,
+    pub text: *mut c_char,
+    pub detail: *mut c_char,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
 pub struct llama_server_bridge_vlm_result {
     pub ok: i32,
     pub truncated: i32,
@@ -111,6 +159,12 @@ pub struct llama_server_bridge_device_info {
 type FnDefaultParams = unsafe extern "C" fn() -> llama_server_bridge_params;
 type FnDefaultChatRequest = unsafe extern "C" fn() -> llama_server_bridge_chat_request;
 type FnDefaultAudioRawRequest = unsafe extern "C" fn() -> llama_server_bridge_audio_raw_request;
+type FnDefaultAudioSessionParams =
+    unsafe extern "C" fn() -> llama_server_bridge_audio_session_params;
+type FnDefaultAudioTranscriptionParams =
+    unsafe extern "C" fn() -> llama_server_bridge_audio_transcription_params;
+type FnDefaultRealtimeParamsForBackend =
+    unsafe extern "C" fn(i32) -> llama_server_bridge_realtime_params;
 type FnEmptyVlmResult = unsafe extern "C" fn() -> llama_server_bridge_vlm_result;
 type FnEmptyJsonResult = unsafe extern "C" fn() -> llama_server_bridge_json_result;
 type FnCreate = unsafe extern "C" fn(*const llama_server_bridge_params) -> *mut llama_server_bridge;
@@ -125,6 +179,46 @@ type FnAudioRaw = unsafe extern "C" fn(
     *const llama_server_bridge_audio_raw_request,
     *mut llama_server_bridge_json_result,
 ) -> i32;
+type FnAudioSessionCreate = unsafe extern "C" fn(
+    *const llama_server_bridge_audio_session_params,
+) -> *mut llama_server_bridge_audio_session;
+type FnAudioSessionDestroy = unsafe extern "C" fn(*mut llama_server_bridge_audio_session);
+type FnAudioSessionPushAudio = unsafe extern "C" fn(
+    *mut llama_server_bridge_audio_session,
+    *const core::ffi::c_void,
+    usize,
+    u32,
+    u32,
+    i32,
+) -> i32;
+type FnAudioSessionPushEncoded = unsafe extern "C" fn(
+    *mut llama_server_bridge_audio_session,
+    *const u8,
+    usize,
+    *const c_char,
+) -> i32;
+type FnAudioSessionFlushAudio = unsafe extern "C" fn(*mut llama_server_bridge_audio_session) -> i32;
+type FnAudioSessionStartDiarization = unsafe extern "C" fn(
+    *mut llama_server_bridge_audio_session,
+    *const llama_server_bridge_realtime_params,
+) -> i32;
+type FnAudioSessionStopDiarization =
+    unsafe extern "C" fn(*mut llama_server_bridge_audio_session) -> i32;
+type FnAudioSessionStartTranscription = unsafe extern "C" fn(
+    *mut llama_server_bridge_audio_session,
+    *const llama_server_bridge_audio_transcription_params,
+) -> i32;
+type FnAudioSessionWaitEvents =
+    unsafe extern "C" fn(*mut llama_server_bridge_audio_session, u32) -> i32;
+type FnAudioSessionDrainEvents = unsafe extern "C" fn(
+    *mut llama_server_bridge_audio_session,
+    *mut *mut llama_server_bridge_audio_event,
+    *mut usize,
+    usize,
+) -> i32;
+type FnAudioSessionFreeEvents = unsafe extern "C" fn(*mut llama_server_bridge_audio_event, usize);
+type FnAudioSessionLastError =
+    unsafe extern "C" fn(*const llama_server_bridge_audio_session) -> *const c_char;
 type FnResultFree = unsafe extern "C" fn(*mut llama_server_bridge_vlm_result);
 type FnJsonResultFree = unsafe extern "C" fn(*mut llama_server_bridge_json_result);
 type FnLastError = unsafe extern "C" fn(*const llama_server_bridge) -> *const c_char;
@@ -163,6 +257,36 @@ pub struct AudioRunParams {
     pub ffmpeg_convert: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RealtimeRunParams {
+    pub backend_kind: i32,
+    pub model_path: String,
+    pub backend_name: String,
+    pub expected_sample_rate_hz: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioSessionParams {
+    pub expected_input_sample_rate_hz: u32,
+    pub expected_input_channels: u32,
+    pub max_buffered_audio_samples: u32,
+    pub event_queue_capacity: u32,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct AudioSessionEvent {
+    pub seq_no: u64,
+    pub kind: i32,
+    pub flags: u32,
+    pub start_sample: u64,
+    pub end_sample: u64,
+    pub speaker_id: i32,
+    pub item_id: u32,
+    pub text: String,
+    pub detail: String,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
@@ -174,18 +298,54 @@ pub struct DeviceInfo {
     pub memory_total: u64,
 }
 
+pub const REALTIME_BACKEND_SORTFORMER: i32 = 1;
+pub const REALTIME_BACKEND_VOXTRAL: i32 = 2;
+pub const AUDIO_SAMPLE_FORMAT_S16: i32 = 2;
+pub const AUDIO_TRANSCRIPTION_MODE_OFFLINE_ROUTE: i32 = 0;
+pub const AUDIO_TRANSCRIPTION_MODE_REALTIME_NATIVE: i32 = 1;
+pub const AUDIO_EVENT_NOTICE: i32 = 0;
+pub const AUDIO_EVENT_DIARIZATION_SPAN_COMMIT: i32 = 3;
+pub const AUDIO_EVENT_DIARIZATION_STOPPED: i32 = 2;
+pub const AUDIO_EVENT_DIARIZATION_TRANSCRIPT_COMMIT: i32 = 4;
+pub const AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT: i32 = 8;
+pub const AUDIO_EVENT_TRANSCRIPTION_WORD_COMMIT: i32 = 9;
+pub const AUDIO_EVENT_TRANSCRIPTION_RESULT_JSON: i32 = 10;
+pub const AUDIO_EVENT_TRANSCRIPTION_STOPPED: i32 = 11;
+pub const AUDIO_EVENT_STREAM_FLUSHED: i32 = 12;
+pub const AUDIO_EVENT_ERROR: i32 = 13;
+pub const AUDIO_EVENT_FLAG_FINAL: u32 = 1u32 << 0;
+pub const AUDIO_EVENT_FLAG_FROM_BUFFER_REPLAY: u32 = 1u32 << 1;
+pub const AUDIO_EVENT_FLAG_PREVIEW: u32 = 1u32 << 2;
+pub const AUDIO_EVENT_FLAG_SNAPSHOT_START: u32 = 1u32 << 3;
+pub const AUDIO_EVENT_FLAG_SNAPSHOT_END: u32 = 1u32 << 4;
+
 pub struct BridgeApi {
     runtime_dir: PathBuf,
     _lib: Library,
     default_params: FnDefaultParams,
     default_chat_request: FnDefaultChatRequest,
     default_audio_raw_request: FnDefaultAudioRawRequest,
+    default_audio_session_params: FnDefaultAudioSessionParams,
+    default_audio_transcription_params: FnDefaultAudioTranscriptionParams,
+    default_realtime_params_for_backend: FnDefaultRealtimeParamsForBackend,
     empty_vlm_result: FnEmptyVlmResult,
     empty_json_result: FnEmptyJsonResult,
     create: FnCreate,
     destroy: FnDestroy,
     chat_complete: FnChatComplete,
     audio_raw: FnAudioRaw,
+    audio_session_create: FnAudioSessionCreate,
+    audio_session_destroy: FnAudioSessionDestroy,
+    audio_session_push_audio: FnAudioSessionPushAudio,
+    audio_session_push_encoded: FnAudioSessionPushEncoded,
+    audio_session_flush_audio: FnAudioSessionFlushAudio,
+    audio_session_start_diarization: FnAudioSessionStartDiarization,
+    audio_session_stop_diarization: FnAudioSessionStopDiarization,
+    audio_session_start_transcription: FnAudioSessionStartTranscription,
+    audio_session_wait_events: FnAudioSessionWaitEvents,
+    audio_session_drain_events: FnAudioSessionDrainEvents,
+    audio_session_free_events: FnAudioSessionFreeEvents,
+    audio_session_last_error: FnAudioSessionLastError,
     result_free: FnResultFree,
     json_result_free: FnJsonResultFree,
     last_error: FnLastError,
@@ -200,6 +360,11 @@ struct BridgeHandle<'a> {
     ptr: *mut llama_server_bridge,
 }
 
+pub struct AudioSessionHandle<'a> {
+    api: &'a BridgeApi,
+    ptr: *mut llama_server_bridge_audio_session,
+}
+
 impl Drop for BridgeHandle<'_> {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
@@ -210,7 +375,34 @@ impl Drop for BridgeHandle<'_> {
     }
 }
 
+impl Drop for AudioSessionHandle<'_> {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                (self.api.audio_session_destroy)(self.ptr);
+            }
+        }
+    }
+}
+
 impl BridgeApi {
+    pub fn default_audio_session_params_native(&self) -> llama_server_bridge_audio_session_params {
+        unsafe { (self.default_audio_session_params)() }
+    }
+
+    pub fn default_audio_transcription_params_native(
+        &self,
+    ) -> llama_server_bridge_audio_transcription_params {
+        unsafe { (self.default_audio_transcription_params)() }
+    }
+
+    pub fn default_realtime_params_native_for_backend(
+        &self,
+        backend_kind: i32,
+    ) -> llama_server_bridge_realtime_params {
+        unsafe { (self.default_realtime_params_for_backend)(backend_kind) }
+    }
+
     pub fn load(runtime_dir: &Path) -> Result<Self> {
         let runtime_dir = runtime_dir
             .canonicalize()
@@ -234,6 +426,23 @@ impl BridgeApi {
             let default_audio_raw_request = *lib
                 .get::<FnDefaultAudioRawRequest>(b"llama_server_bridge_default_audio_raw_request\0")
                 .context("missing symbol llama_server_bridge_default_audio_raw_request")?;
+            let default_audio_session_params = *lib
+                .get::<FnDefaultAudioSessionParams>(
+                    b"llama_server_bridge_default_audio_session_params\0",
+                )
+                .context("missing symbol llama_server_bridge_default_audio_session_params")?;
+            let default_audio_transcription_params = *lib
+                .get::<FnDefaultAudioTranscriptionParams>(
+                    b"llama_server_bridge_default_audio_transcription_params\0",
+                )
+                .context("missing symbol llama_server_bridge_default_audio_transcription_params")?;
+            let default_realtime_params_for_backend = *lib
+                .get::<FnDefaultRealtimeParamsForBackend>(
+                    b"llama_server_bridge_default_realtime_params_for_backend\0",
+                )
+                .context(
+                    "missing symbol llama_server_bridge_default_realtime_params_for_backend",
+                )?;
             let empty_vlm_result = *lib
                 .get::<FnEmptyVlmResult>(b"llama_server_bridge_empty_vlm_result\0")
                 .context("missing symbol llama_server_bridge_empty_vlm_result")?;
@@ -252,6 +461,52 @@ impl BridgeApi {
             let audio_raw = *lib
                 .get::<FnAudioRaw>(b"llama_server_bridge_audio_transcriptions_raw\0")
                 .context("missing symbol llama_server_bridge_audio_transcriptions_raw")?;
+            let audio_session_create = *lib
+                .get::<FnAudioSessionCreate>(b"llama_server_bridge_audio_session_create\0")
+                .context("missing symbol llama_server_bridge_audio_session_create")?;
+            let audio_session_destroy = *lib
+                .get::<FnAudioSessionDestroy>(b"llama_server_bridge_audio_session_destroy\0")
+                .context("missing symbol llama_server_bridge_audio_session_destroy")?;
+            let audio_session_push_audio = *lib
+                .get::<FnAudioSessionPushAudio>(b"llama_server_bridge_audio_session_push_audio\0")
+                .context("missing symbol llama_server_bridge_audio_session_push_audio")?;
+            let audio_session_push_encoded = *lib
+                .get::<FnAudioSessionPushEncoded>(
+                    b"llama_server_bridge_audio_session_push_encoded\0",
+                )
+                .context("missing symbol llama_server_bridge_audio_session_push_encoded")?;
+            let audio_session_flush_audio = *lib
+                .get::<FnAudioSessionFlushAudio>(b"llama_server_bridge_audio_session_flush_audio\0")
+                .context("missing symbol llama_server_bridge_audio_session_flush_audio")?;
+            let audio_session_start_diarization = *lib
+                .get::<FnAudioSessionStartDiarization>(
+                    b"llama_server_bridge_audio_session_start_diarization\0",
+                )
+                .context("missing symbol llama_server_bridge_audio_session_start_diarization")?;
+            let audio_session_stop_diarization = *lib
+                .get::<FnAudioSessionStopDiarization>(
+                    b"llama_server_bridge_audio_session_stop_diarization\0",
+                )
+                .context("missing symbol llama_server_bridge_audio_session_stop_diarization")?;
+            let audio_session_start_transcription = *lib
+                .get::<FnAudioSessionStartTranscription>(
+                    b"llama_server_bridge_audio_session_start_transcription\0",
+                )
+                .context("missing symbol llama_server_bridge_audio_session_start_transcription")?;
+            let audio_session_wait_events = *lib
+                .get::<FnAudioSessionWaitEvents>(b"llama_server_bridge_audio_session_wait_events\0")
+                .context("missing symbol llama_server_bridge_audio_session_wait_events")?;
+            let audio_session_drain_events = *lib
+                .get::<FnAudioSessionDrainEvents>(
+                    b"llama_server_bridge_audio_session_drain_events\0",
+                )
+                .context("missing symbol llama_server_bridge_audio_session_drain_events")?;
+            let audio_session_free_events = *lib
+                .get::<FnAudioSessionFreeEvents>(b"llama_server_bridge_audio_session_free_events\0")
+                .context("missing symbol llama_server_bridge_audio_session_free_events")?;
+            let audio_session_last_error = *lib
+                .get::<FnAudioSessionLastError>(b"llama_server_bridge_audio_session_last_error\0")
+                .context("missing symbol llama_server_bridge_audio_session_last_error")?;
             let result_free = *lib
                 .get::<FnResultFree>(b"llama_server_bridge_result_free\0")
                 .context("missing symbol llama_server_bridge_result_free")?;
@@ -274,12 +529,27 @@ impl BridgeApi {
                 default_params,
                 default_chat_request,
                 default_audio_raw_request,
+                default_audio_session_params,
+                default_audio_transcription_params,
+                default_realtime_params_for_backend,
                 empty_vlm_result,
                 empty_json_result,
                 create,
                 destroy,
                 chat_complete,
                 audio_raw,
+                audio_session_create,
+                audio_session_destroy,
+                audio_session_push_audio,
+                audio_session_push_encoded,
+                audio_session_flush_audio,
+                audio_session_start_diarization,
+                audio_session_stop_diarization,
+                audio_session_start_transcription,
+                audio_session_wait_events,
+                audio_session_drain_events,
+                audio_session_free_events,
+                audio_session_last_error,
                 result_free,
                 json_result_free,
                 last_error,
@@ -426,6 +696,46 @@ impl BridgeApi {
         }
     }
 
+    pub fn create_audio_session<'a>(
+        &'a self,
+        params: &AudioSessionParams,
+    ) -> Result<AudioSessionHandle<'a>> {
+        let mut session_params = unsafe { (self.default_audio_session_params)() };
+        session_params.expected_input_sample_rate_hz = params.expected_input_sample_rate_hz;
+        session_params.expected_input_channels = params.expected_input_channels;
+        session_params.max_buffered_audio_samples = params.max_buffered_audio_samples;
+        session_params.event_queue_capacity = params.event_queue_capacity;
+
+        let ptr =
+            self.with_runtime_cwd(|| unsafe { (self.audio_session_create)(&session_params) })?;
+        if ptr.is_null() {
+            bail!("llama_server_bridge_audio_session_create returned null");
+        }
+        Ok(AudioSessionHandle { api: self, ptr })
+    }
+
+    fn make_realtime_params(
+        &self,
+        run: &RealtimeRunParams,
+    ) -> Result<(llama_server_bridge_realtime_params, CString, CString)> {
+        if run.model_path.trim().is_empty() {
+            bail!("realtime model path is empty");
+        }
+        if run.backend_name.trim().is_empty() {
+            bail!("realtime backend name is empty");
+        }
+        let model_c = CString::new(run.model_path.as_str())
+            .context("realtime model path contains NUL byte")?;
+        let backend_c = CString::new(run.backend_name.as_str())
+            .context("realtime backend name contains NUL byte")?;
+        let mut params = unsafe { (self.default_realtime_params_for_backend)(run.backend_kind) };
+        params.backend_kind = run.backend_kind;
+        params.model_path = model_c.as_ptr();
+        params.backend_name = backend_c.as_ptr();
+        params.expected_sample_rate_hz = run.expected_sample_rate_hz;
+        Ok((params, model_c, backend_c))
+    }
+
     fn create_bridge<'a>(
         &'a self,
         shared: &SharedBridgeParams,
@@ -533,6 +843,249 @@ impl BridgeApi {
         let _reset = CwdResetGuard { prev };
 
         Ok(f())
+    }
+}
+
+impl AudioSessionHandle<'_> {
+    pub fn start_diarization(&self, run: &RealtimeRunParams) -> Result<()> {
+        let (params, _model_c, _backend_c) = self.api.make_realtime_params(run)?;
+        let rc = self.api.with_runtime_cwd(|| unsafe {
+            (self.api.audio_session_start_diarization)(self.ptr, &params)
+        })?;
+        if rc != 0 {
+            bail!(
+                "audio session diarization start failed rc={} err='{}'",
+                rc,
+                cstr_from_const(unsafe { (self.api.audio_session_last_error)(self.ptr) })
+            );
+        }
+        Ok(())
+    }
+
+    pub fn stop_diarization(&self) -> Result<()> {
+        let rc = self
+            .api
+            .with_runtime_cwd(|| unsafe { (self.api.audio_session_stop_diarization)(self.ptr) })?;
+        if rc != 0 {
+            bail!(
+                "audio session diarization stop failed rc={} err='{}'",
+                rc,
+                cstr_from_const(unsafe { (self.api.audio_session_last_error)(self.ptr) })
+            );
+        }
+        Ok(())
+    }
+
+    pub fn start_transcription_realtime(&self, run: &RealtimeRunParams) -> Result<()> {
+        let (realtime_params, _model_c, _backend_c) = self.api.make_realtime_params(run)?;
+        let mut params = unsafe { (self.api.default_audio_transcription_params)() };
+        params.mode = AUDIO_TRANSCRIPTION_MODE_REALTIME_NATIVE;
+        params.realtime_params = realtime_params;
+        let rc = self.api.with_runtime_cwd(|| unsafe {
+            (self.api.audio_session_start_transcription)(self.ptr, &params)
+        })?;
+        if rc != 0 {
+            bail!(
+                "audio session transcription start failed rc={} err='{}'",
+                rc,
+                cstr_from_const(unsafe { (self.api.audio_session_last_error)(self.ptr) })
+            );
+        }
+        Ok(())
+    }
+
+    pub fn start_transcription_offline(
+        &self,
+        shared: &SharedBridgeParams,
+        metadata_json: &Value,
+    ) -> Result<()> {
+        let devices_c = match shared.devices.as_deref() {
+            Some(v) if !v.trim().is_empty() => {
+                Some(CString::new(v).context("devices contains NUL byte")?)
+            }
+            _ => None,
+        };
+        let tensor_split_c = match shared.tensor_split.as_deref() {
+            Some(v) if !v.trim().is_empty() => {
+                Some(CString::new(v).context("tensor_split contains NUL byte")?)
+            }
+            _ => None,
+        };
+        if shared.gpu.is_some() && devices_c.is_some() {
+            bail!("invalid bridge params: 'gpu' and 'devices' cannot both be set");
+        }
+        let metadata_c = CString::new(metadata_json.to_string())
+            .context("audio transcription metadata contains NUL byte")?;
+
+        let mut params = unsafe { (self.api.default_audio_transcription_params)() };
+        params.mode = AUDIO_TRANSCRIPTION_MODE_OFFLINE_ROUTE;
+        params.metadata_json = metadata_c.as_ptr();
+        params.bridge_params.n_ctx = shared.n_ctx;
+        params.bridge_params.n_batch = shared.n_batch;
+        params.bridge_params.n_ubatch = shared.n_ubatch;
+        params.bridge_params.n_parallel = shared.n_parallel;
+        if let Some(v) = shared.n_threads {
+            params.bridge_params.n_threads = v;
+        }
+        if let Some(v) = shared.n_threads_batch {
+            params.bridge_params.n_threads_batch = v;
+        }
+        if let Some(v) = shared.n_gpu_layers {
+            params.bridge_params.n_gpu_layers = v;
+        }
+        if let Some(v) = shared.main_gpu {
+            params.bridge_params.main_gpu = v;
+        }
+        if let Some(v) = shared.gpu {
+            params.bridge_params.gpu = v;
+        }
+        params.bridge_params.devices = devices_c
+            .as_ref()
+            .map(|v| v.as_ptr())
+            .unwrap_or(ptr::null());
+        params.bridge_params.tensor_split = tensor_split_c
+            .as_ref()
+            .map(|v| v.as_ptr())
+            .unwrap_or(ptr::null());
+        params.bridge_params.split_mode = shared.split_mode;
+        params.bridge_params.embedding = 0;
+        params.bridge_params.reranking = 0;
+
+        let rc = self.api.with_runtime_cwd(|| unsafe {
+            (self.api.audio_session_start_transcription)(self.ptr, &params)
+        })?;
+        if rc != 0 {
+            bail!(
+                "audio session transcription start failed rc={} err='{}'",
+                rc,
+                cstr_from_const(unsafe { (self.api.audio_session_last_error)(self.ptr) })
+            );
+        }
+        Ok(())
+    }
+
+    pub fn push_audio_s16(
+        &self,
+        samples: &[i16],
+        sample_rate_hz: u32,
+        channels: u32,
+    ) -> Result<()> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        let frame_count = samples.len() / channels.max(1) as usize;
+        if frame_count == 0 {
+            return Ok(());
+        }
+        let rc = self.api.with_runtime_cwd(|| unsafe {
+            (self.api.audio_session_push_audio)(
+                self.ptr,
+                samples.as_ptr() as *const core::ffi::c_void,
+                frame_count,
+                sample_rate_hz,
+                channels,
+                AUDIO_SAMPLE_FORMAT_S16,
+            )
+        })?;
+        if rc != 0 {
+            bail!(
+                "audio session push failed rc={} err='{}'",
+                rc,
+                cstr_from_const(unsafe { (self.api.audio_session_last_error)(self.ptr) })
+            );
+        }
+        Ok(())
+    }
+
+    pub fn push_encoded(&self, audio_bytes: &[u8], audio_format: &str) -> Result<()> {
+        if audio_bytes.is_empty() {
+            bail!("encoded audio bytes are empty");
+        }
+        if audio_format.trim().is_empty() {
+            bail!("encoded audio format is empty");
+        }
+        let audio_format_c =
+            CString::new(audio_format).context("encoded audio format contains NUL byte")?;
+        let rc = self.api.with_runtime_cwd(|| unsafe {
+            (self.api.audio_session_push_encoded)(
+                self.ptr,
+                audio_bytes.as_ptr(),
+                audio_bytes.len(),
+                audio_format_c.as_ptr(),
+            )
+        })?;
+        if rc != 0 {
+            bail!(
+                "audio session encoded push failed rc={} err='{}'",
+                rc,
+                cstr_from_const(unsafe { (self.api.audio_session_last_error)(self.ptr) })
+            );
+        }
+        Ok(())
+    }
+
+    pub fn flush_audio(&self) -> Result<()> {
+        let rc = self
+            .api
+            .with_runtime_cwd(|| unsafe { (self.api.audio_session_flush_audio)(self.ptr) })?;
+        if rc != 0 {
+            bail!(
+                "audio session flush failed rc={} err='{}'",
+                rc,
+                cstr_from_const(unsafe { (self.api.audio_session_last_error)(self.ptr) })
+            );
+        }
+        Ok(())
+    }
+
+    pub fn wait_events(&self, timeout_ms: u32) -> Result<i32> {
+        let rc = self.api.with_runtime_cwd(|| unsafe {
+            (self.api.audio_session_wait_events)(self.ptr, timeout_ms)
+        })?;
+        if rc < 0 {
+            bail!(
+                "audio session wait failed rc={} err='{}'",
+                rc,
+                cstr_from_const(unsafe { (self.api.audio_session_last_error)(self.ptr) })
+            );
+        }
+        Ok(rc)
+    }
+
+    pub fn drain_events(&self, max_events: usize) -> Result<Vec<AudioSessionEvent>> {
+        let mut ptr_events = ptr::null_mut();
+        let mut count = 0usize;
+        let rc = self.api.with_runtime_cwd(|| unsafe {
+            (self.api.audio_session_drain_events)(self.ptr, &mut ptr_events, &mut count, max_events)
+        })?;
+        if rc != 0 {
+            bail!(
+                "audio session drain failed rc={} err='{}'",
+                rc,
+                cstr_from_const(unsafe { (self.api.audio_session_last_error)(self.ptr) })
+            );
+        }
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let ev = unsafe { &*ptr_events.add(i) };
+            out.push(AudioSessionEvent {
+                seq_no: ev.seq_no,
+                kind: ev.kind,
+                flags: ev.flags,
+                start_sample: ev.start_sample,
+                end_sample: ev.end_sample,
+                speaker_id: ev.speaker_id,
+                item_id: ev.item_id,
+                text: cstr_from_mut(ev.text),
+                detail: cstr_from_mut(ev.detail),
+            });
+        }
+        if !ptr_events.is_null() {
+            unsafe {
+                (self.api.audio_session_free_events)(ptr_events, count);
+            }
+        }
+        Ok(out)
     }
 }
 

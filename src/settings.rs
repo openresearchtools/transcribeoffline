@@ -11,7 +11,9 @@ pub struct AppPaths {
     pub data_dir: PathBuf,
     pub models_dir: PathBuf,
     pub whisper_models_dir: PathBuf,
+    pub live_models_dir: PathBuf,
     pub diarization_models_dir: PathBuf,
+    pub live_sessions_dir: PathBuf,
     pub settings_yaml: PathBuf,
     pub model_links_yaml: PathBuf,
 }
@@ -20,6 +22,7 @@ pub struct AppPaths {
 pub struct ModelLinks {
     pub chat_model: String,
     pub whisper_model: String,
+    pub live_transcription_model: String,
     pub diarization_models_dir: String,
 }
 
@@ -30,12 +33,13 @@ pub struct AppSettings {
     pub audio_file: String,
     pub output_dir: String,
     pub whisper_model: String,
+    pub live_transcription_model: String,
+    pub live_input_device: String,
     pub diarization_models_dir: String,
     pub mode: String,
     pub custom_mode: String,
     pub subtitle_custom_mode: String,
     pub speech_custom_mode: String,
-    pub speaker_count: String,
     pub diarization_enabled: bool,
     pub whisper_no_gpu: bool,
     pub ffmpeg_convert: bool,
@@ -60,6 +64,7 @@ pub struct AppSettings {
     pub seek_step_growth_sec: f32,
     pub playback_toggle_offset_sec: f32,
     pub runtime_download_backend: String,
+    pub live_diarization_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -69,12 +74,13 @@ impl Default for AppSettings {
             audio_file: String::new(),
             output_dir: String::new(),
             whisper_model: String::new(),
+            live_transcription_model: String::new(),
+            live_input_device: String::new(),
             diarization_models_dir: String::new(),
             mode: "transcript".to_string(),
             custom_mode: "auto".to_string(),
             subtitle_custom_mode: "auto".to_string(),
             speech_custom_mode: "auto".to_string(),
-            speaker_count: "auto".to_string(),
             diarization_enabled: true,
             whisper_no_gpu: false,
             ffmpeg_convert: true,
@@ -99,6 +105,7 @@ impl Default for AppSettings {
             seek_step_growth_sec: 2.0,
             playback_toggle_offset_sec: 0.0,
             runtime_download_backend: "vulkan".to_string(),
+            live_diarization_enabled: true,
         }
     }
 }
@@ -195,22 +202,81 @@ mod tests {
 
 pub fn default_models_root_dir() -> PathBuf {
     if let Some(dirs) = BaseDirs::new() {
-        return dirs.data_dir().join("OpenResearchTools").join("Models");
+        return dirs.data_dir().join("OpenResearchTools").join("models");
     }
 
     if let Ok(app_data) = std::env::var("APPDATA") {
         return PathBuf::from(app_data)
             .join("OpenResearchTools")
-            .join("Models");
+            .join("models");
     }
 
-    PathBuf::from("Models")
+    PathBuf::from("models")
 }
 
 pub const DEFAULT_WHISPER_MODEL_FILE: &str = "ggml-large-v3-turbo.bin";
+pub const DEFAULT_LIVE_TRANSCRIPTION_MODEL_FILE: &str = "voxtral-mini-4b-realtime-q4_0.gguf";
+pub const WHISPER_REPO_DIR_NAME: &str = "ggerganov__whisper.cpp";
+pub const LIVE_TRANSCRIPTION_REPO_DIR_NAME: &str =
+    "openresearchtools__Voxtral-Mini-4B-Realtime-2602";
+pub const DIARIZATION_REPO_DIR_NAME: &str =
+    "openresearchtools__diar_streaming_sortformer_4spk-v2.1-gguf";
+
+fn path_file_name_eq(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .map(|value| value.to_string_lossy().eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
+fn normalize_repo_managed_file_path(raw: &str, repo_dir: &Path, legacy_dir_name: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let path = PathBuf::from(trimmed);
+    let Some(file_name) = path.file_name() else {
+        return trimmed.to_string();
+    };
+    let repo_path = repo_dir.join(file_name);
+
+    if repo_path.exists() {
+        return repo_path.display().to_string();
+    }
+
+    if path
+        .parent()
+        .map(|parent| path_file_name_eq(parent, legacy_dir_name))
+        .unwrap_or(false)
+    {
+        return repo_path.display().to_string();
+    }
+
+    trimmed.to_string()
+}
+
+fn normalize_repo_managed_dir_path(raw: &str, repo_dir: &Path, legacy_dir_name: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let path = PathBuf::from(trimmed);
+    if path == repo_dir || path_file_name_eq(&path, legacy_dir_name) {
+        return repo_dir.display().to_string();
+    }
+
+    trimmed.to_string()
+}
 
 pub fn default_whisper_model_path(paths: &AppPaths) -> PathBuf {
     paths.whisper_models_dir.join(DEFAULT_WHISPER_MODEL_FILE)
+}
+
+pub fn default_live_transcription_model_path(paths: &AppPaths) -> PathBuf {
+    paths
+        .live_models_dir
+        .join(DEFAULT_LIVE_TRANSCRIPTION_MODEL_FILE)
 }
 
 pub fn default_diarization_models_dir(paths: &AppPaths) -> PathBuf {
@@ -223,8 +289,10 @@ pub fn app_paths() -> Result<AppPaths> {
     let config_dir = dirs.config_dir().to_path_buf();
     let data_dir = dirs.data_dir().to_path_buf();
     let models_dir = default_models_root_dir();
-    let whisper_models_dir = models_dir.join("Whisper");
-    let diarization_models_dir = models_dir.join("Diarization");
+    let whisper_models_dir = models_dir.join(WHISPER_REPO_DIR_NAME);
+    let live_models_dir = models_dir.join(LIVE_TRANSCRIPTION_REPO_DIR_NAME);
+    let diarization_models_dir = models_dir.join(DIARIZATION_REPO_DIR_NAME);
+    let live_sessions_dir = data_dir.join("live-sessions");
     Ok(AppPaths {
         settings_yaml: config_dir.join("settings.yaml"),
         model_links_yaml: config_dir.join("model-links.yaml"),
@@ -232,7 +300,9 @@ pub fn app_paths() -> Result<AppPaths> {
         data_dir,
         models_dir,
         whisper_models_dir,
+        live_models_dir,
         diarization_models_dir,
+        live_sessions_dir,
     })
 }
 
@@ -261,10 +331,22 @@ pub fn ensure_dirs(paths: &AppPaths) -> Result<()> {
             paths.whisper_models_dir.display()
         )
     })?;
+    fs::create_dir_all(&paths.live_models_dir).with_context(|| {
+        format!(
+            "failed to create realtime models directory '{}'",
+            paths.live_models_dir.display()
+        )
+    })?;
     fs::create_dir_all(&paths.diarization_models_dir).with_context(|| {
         format!(
             "failed to create diarization models directory '{}'",
             paths.diarization_models_dir.display()
+        )
+    })?;
+    fs::create_dir_all(&paths.live_sessions_dir).with_context(|| {
+        format!(
+            "failed to create live sessions directory '{}'",
+            paths.live_sessions_dir.display()
         )
     })?;
     Ok(())
@@ -274,6 +356,9 @@ pub fn load_settings(paths: &AppPaths) -> Result<AppSettings> {
     if !paths.settings_yaml.exists() {
         let mut defaults = AppSettings::default();
         defaults.whisper_model = default_whisper_model_path(paths).display().to_string();
+        defaults.live_transcription_model = default_live_transcription_model_path(paths)
+            .display()
+            .to_string();
         defaults.diarization_models_dir =
             default_diarization_models_dir(paths).display().to_string();
         save_settings(paths, &defaults)?;
@@ -295,15 +380,44 @@ pub fn load_settings(paths: &AppPaths) -> Result<AppSettings> {
     };
     let mut parsed: AppSettings = serde_yaml::from_str(&effective_raw)
         .with_context(|| format!("failed to parse '{}'", paths.settings_yaml.display()))?;
+    let original_runtime_dir = parsed.runtime_dir.clone();
+    let original_whisper_model = parsed.whisper_model.clone();
+    let original_live_model = parsed.live_transcription_model.clone();
+    let original_diarization_dir = parsed.diarization_models_dir.clone();
     parsed.runtime_dir = normalize_runtime_dir(parsed.runtime_dir);
+    parsed.whisper_model =
+        normalize_repo_managed_file_path(&parsed.whisper_model, &paths.whisper_models_dir, "Whisper");
+    parsed.live_transcription_model = normalize_repo_managed_file_path(
+        &parsed.live_transcription_model,
+        &paths.live_models_dir,
+        "Realtime",
+    );
+    parsed.diarization_models_dir = normalize_repo_managed_dir_path(
+        &parsed.diarization_models_dir,
+        &paths.diarization_models_dir,
+        "Diarization",
+    );
     if parsed.runtime_dir.trim().is_empty() {
         parsed.runtime_dir = default_runtime_dir().display().to_string();
     }
     if parsed.whisper_model.trim().is_empty() {
         parsed.whisper_model = default_whisper_model_path(paths).display().to_string();
     }
+    if parsed.live_transcription_model.trim().is_empty() {
+        parsed.live_transcription_model = default_live_transcription_model_path(paths)
+            .display()
+            .to_string();
+    }
     if parsed.diarization_models_dir.trim().is_empty() {
         parsed.diarization_models_dir = default_diarization_models_dir(paths).display().to_string();
+    }
+    if parsed.runtime_dir != original_runtime_dir
+        || parsed.whisper_model != original_whisper_model
+        || parsed.live_transcription_model != original_live_model
+        || parsed.diarization_models_dir != original_diarization_dir
+    {
+        save_settings(paths, &parsed)?;
+        save_model_links(paths, &parsed.to_model_links())?;
     }
     Ok(parsed)
 }
@@ -349,6 +463,7 @@ impl AppSettings {
         ModelLinks {
             chat_model: self.chat_model.clone(),
             whisper_model: self.whisper_model.clone(),
+            live_transcription_model: self.live_transcription_model.clone(),
             diarization_models_dir: self.diarization_models_dir.clone(),
         }
     }

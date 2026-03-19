@@ -1,6 +1,10 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod audio_assembler;
+mod audio_capture_api;
+mod audio_orchestrator;
 mod bridge;
+mod live;
 mod runtime_installer;
 mod settings;
 
@@ -14,8 +18,9 @@ use regex::Regex;
 use rfd::FileDialog;
 use serde_json::{json, Value};
 use settings::{
-    app_paths, default_diarization_models_dir, default_whisper_model_path, ensure_dirs,
-    load_settings, save_model_links, save_settings, AppPaths, AppSettings,
+    app_paths, default_diarization_models_dir, default_live_transcription_model_path,
+    default_whisper_model_path, ensure_dirs, load_settings, save_model_links, save_settings,
+    AppPaths, AppSettings,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
@@ -28,6 +33,10 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bridge::{AudioRunParams, BridgeApi, ChatRunParams, SharedBridgeParams};
+use live::{
+    enumerate_input_device_options, resolve_input_device_index, ActiveLiveCapture,
+    LiveInputDeviceOption,
+};
 
 const AUDIO_DEVICE_CPU_LABEL: &str = "CPU (no GPU)";
 const UI_FONT_SIZE_DEFAULT_PX: f32 = 12.0;
@@ -35,7 +44,8 @@ const UI_FONT_SIZE_MIN_PX: f32 = 10.0;
 const UI_FONT_SIZE_MAX_PX: f32 = 22.0;
 const UI_FONT_SIZE_STEP_PX: f32 = 1.0;
 const DIARIZATION_REPO: &str =
-    "https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF";
+    "https://huggingface.co/openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf";
+const SORTFORMER_MODEL_FILE: &str = "diar_streaming_sortformer_4spk-v2.1.gguf";
 const ANONYMISE_TOOLTIP: &str =
     "Anonymise (beta) requires a chat model configured in Settings -> Chat settings.";
 const PLAYBACK_SCROLL_FOLLOW_PAUSE_SEC: f64 = 5.0;
@@ -77,6 +87,13 @@ fn decode_app_icon_data() -> Option<egui::IconData> {
 
 #[derive(Clone, Copy)]
 struct WhisperModelSpec {
+    label: &'static str,
+    file_name: &'static str,
+    url: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct LiveModelSpec {
     label: &'static str,
     file_name: &'static str,
     url: &'static str,
@@ -331,6 +348,14 @@ fn runtime_missing_messages(runtime_dir: &Path) -> Vec<String> {
         ));
     }
 
+    let audio_capture = runtime_dir.join(audio_capture_library_file_name());
+    if !audio_capture.exists() {
+        missing.push(format!(
+            "Missing live audio library: {}",
+            audio_capture_library_file_name()
+        ));
+    }
+
     let ffmpeg_dir = ffmpeg_runtime_dir(runtime_dir);
     if !ffmpeg_dir.exists() {
         missing.push(format!(
@@ -510,25 +535,26 @@ const WHISPER_MODELS: &[WhisperModelSpec] = &[
     },
 ];
 
-#[allow(dead_code)]
-const DIARIZATION_FILES: &[(&str, &str)] = &[
-    (
-        "segmentation.gguf",
-        "https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF/resolve/main/segmentation.gguf?download=true",
-    ),
-    (
-        "embedding.gguf",
-        "https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF/resolve/main/embedding.gguf?download=true",
-    ),
-    (
-        "plda.gguf",
-        "https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF/resolve/main/plda.gguf?download=true",
-    ),
-    (
-        "xvec_transform.gguf",
-        "https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF/resolve/main/xvec_transform.gguf?download=true",
-    ),
+const LIVE_TRANSCRIPTION_MODELS: &[LiveModelSpec] = &[
+    LiveModelSpec {
+        label: "q4_0 (recommended)",
+        file_name: "voxtral-mini-4b-realtime-q4_0.gguf",
+        url: "https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602/resolve/main/voxtral-mini-4b-realtime-q4_0.gguf?download=true",
+    },
+    LiveModelSpec {
+        label: "f16",
+        file_name: "voxtral-mini-4b-realtime-f16.gguf",
+        url: "https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602/resolve/main/voxtral-mini-4b-realtime-f16.gguf?download=true",
+    },
+    LiveModelSpec {
+        label: "q8_0",
+        file_name: "voxtral-mini-4b-realtime-q8_0.gguf",
+        url: "https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602/resolve/main/voxtral-mini-4b-realtime-q8_0.gguf?download=true",
+    },
 ];
+
+const DIARIZATION_MODEL_URL: &str =
+    "https://huggingface.co/openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf/resolve/main/diar_streaming_sortformer_4spk-v2.1.gguf?download=true";
 
 #[derive(Debug, Clone)]
 struct TranscriptionResult {
@@ -788,7 +814,23 @@ enum UiMessage {
     },
     DownloadStatus(Option<String>),
     WhisperInstalled(PathBuf),
+    LiveModelInstalled(PathBuf),
     DiarizationInstalled(PathBuf),
+    LiveSessionStarted {
+        input_device: String,
+        recording_path: PathBuf,
+        transcript_path: PathBuf,
+    },
+    LiveTextAppend(String),
+    LiveTextSet(String),
+    LiveSessionFinished {
+        input_device: String,
+        recording_path: PathBuf,
+        transcript_path: PathBuf,
+        transcript_text: String,
+        preview_text: String,
+    },
+    LiveSessionFailed(String),
 }
 
 #[derive(Clone)]
@@ -910,10 +952,13 @@ struct UiApp {
     should_exit: bool,
 
     whisper_models: usize,
+    live_models: usize,
     chat_source_path: Option<PathBuf>,
 
     audio_devices: Vec<AudioDeviceOption>,
     selected_audio_device: usize,
+    live_input_devices: Vec<LiveInputDeviceOption>,
+    selected_live_input_device: usize,
     runtime_install_backends: Vec<String>,
     selected_runtime_install_backend: usize,
 
@@ -944,6 +989,11 @@ struct UiApp {
     playback_click_sync_target: Option<(f64, Instant)>,
     manual_edit_scroll_sync_y: Option<f32>,
     speaker_rename_entries: Vec<SpeakerRenameEntry>,
+    live_capture: Option<ActiveLiveCapture>,
+    live_text: String,
+    live_recording_path: Option<PathBuf>,
+    live_transcript_path: Option<PathBuf>,
+    live_input_label: String,
 
     playback: PlaybackState,
     fonts_configured: bool,
@@ -970,9 +1020,19 @@ impl UiApp {
         if settings.whisper_model.trim().is_empty() {
             settings.whisper_model = default_whisper_model_path(&paths).display().to_string();
         }
+        if settings.live_transcription_model.trim().is_empty() {
+            settings.live_transcription_model = default_live_transcription_model_path(&paths)
+                .display()
+                .to_string();
+        }
         if settings.diarization_models_dir.trim().is_empty() {
             settings.diarization_models_dir =
                 default_diarization_models_dir(&paths).display().to_string();
+        }
+        if let Some(chat_model_path) =
+            resolve_chat_model_path_from_store(&paths, settings.chat_model.trim())
+        {
+            settings.chat_model = chat_model_path.display().to_string();
         }
         let mode_norm = settings.mode.trim().to_ascii_lowercase();
         if !matches!(mode_norm.as_str(), "transcript" | "speech" | "subtitle") {
@@ -997,7 +1057,7 @@ impl UiApp {
         let initial_status = if !runtime_missing.is_empty() {
             "Runtime missing or incomplete. Install/Repair runtime.".to_string()
         } else if setup_issues_present {
-            "Setup incomplete. Download required Whisper/Diarization models.".to_string()
+            "Setup incomplete. Download required Whisper/Sortformer models.".to_string()
         } else {
             "Ready.".to_string()
         };
@@ -1041,6 +1101,10 @@ impl UiApp {
             );
 
         let whisper_models = select_whisper_model_index(&settings.whisper_model);
+        let live_models = select_live_model_index(&settings.live_transcription_model);
+        let live_input_devices = enumerate_input_device_options(&runtime_dir);
+        let selected_live_input_device =
+            resolve_input_device_index(&live_input_devices, &settings.live_input_device);
 
         let mut app = Self {
             paths,
@@ -1076,9 +1140,12 @@ impl UiApp {
             active_modal: None,
             should_exit: false,
             whisper_models,
+            live_models,
             chat_source_path: None,
             audio_devices,
             selected_audio_device,
+            live_input_devices,
+            selected_live_input_device,
             runtime_install_backends,
             selected_runtime_install_backend,
             transcript_state: TranscriptState::default(),
@@ -1109,6 +1176,11 @@ impl UiApp {
             playback_click_sync_target: None,
             manual_edit_scroll_sync_y: None,
             speaker_rename_entries: Vec::new(),
+            live_capture: None,
+            live_text: String::new(),
+            live_recording_path: None,
+            live_transcript_path: None,
+            live_input_label: String::new(),
             playback: PlaybackState::default(),
             fonts_configured: false,
             settings_dirty: auto_device_applied || runtime_backend_synced,
@@ -1631,7 +1703,7 @@ impl UiApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.label("Complete required setup once and the app is ready.");
-                        ui.label("* Required: Runtime, Whisper model, Diarization models.");
+                        ui.label("* Required: Runtime, Whisper model, Sortformer diarization model.");
                         let _ = self.ui_runtime_management_controls(ui, &runtime_dir, false);
                         ui.separator();
                         self.ui_runtime_device_panel(ui);
@@ -1700,7 +1772,7 @@ impl UiApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.label("Runtime setup: install/unblock runtime, set device, required models, and optional chat model.");
-                        ui.label("* Required: Runtime, Whisper model, Diarization models.");
+                        ui.label("* Required: Runtime, Whisper model, Sortformer diarization model.");
                         let _ = self.ui_runtime_management_controls(ui, &runtime_dir, false);
                         ui.separator();
                         self.ui_runtime_device_panel(ui);
@@ -1734,6 +1806,10 @@ impl UiApp {
                 }
                 if native_menu_item(ui, "Chat").clicked() {
                     self.tab = 1;
+                    ui.close();
+                }
+                if native_menu_item(ui, "Live").clicked() {
+                    self.tab = 2;
                     ui.close();
                 }
             });
@@ -2187,9 +2263,87 @@ impl UiApp {
                     self.push_status(&format!("Whisper model installed: {}", path.display()));
                     self.queue_save();
                 }
+                UiMessage::LiveModelInstalled(path) => {
+                    self.settings.live_transcription_model = path.display().to_string();
+                    self.live_models =
+                        select_live_model_index(&self.settings.live_transcription_model);
+                    self.push_status(&format!(
+                        "Realtime transcription model installed: {}",
+                        path.display()
+                    ));
+                    self.queue_save();
+                }
                 UiMessage::DiarizationInstalled(path) => {
                     self.settings.diarization_models_dir = path.display().to_string();
-                    self.push_status(&format!("Diarization models installed: {}", path.display()));
+                    self.push_status(&format!(
+                        "Sortformer diarization model installed: {}",
+                        path.display()
+                    ));
+                    self.queue_save();
+                }
+                UiMessage::LiveSessionStarted {
+                    input_device,
+                    recording_path,
+                    transcript_path,
+                } => {
+                    self.live_input_label = input_device;
+                    self.live_recording_path = Some(recording_path);
+                    self.live_transcript_path = Some(transcript_path);
+                    self.live_text.clear();
+                }
+                UiMessage::LiveTextAppend(chunk) => {
+                    append_live_preview_text(&mut self.live_text, &chunk);
+                }
+                UiMessage::LiveTextSet(text) => {
+                    self.live_text = text;
+                }
+                UiMessage::LiveSessionFinished {
+                    input_device,
+                    recording_path,
+                    transcript_path,
+                    transcript_text: _,
+                    preview_text,
+                } => {
+                    self.live_capture = None;
+                    self.live_input_label = input_device;
+                    self.live_recording_path = Some(recording_path.clone());
+                    self.live_transcript_path = Some(transcript_path.clone());
+                    self.live_text = preview_text;
+                    self.active_audio_path = Some(recording_path.clone());
+                    self.settings.audio_file = recording_path.display().to_string();
+                    if let Ok(mut state) = self.runtime_state.lock() {
+                        ensure_output_entry(
+                            &mut state.output_entries,
+                            transcript_path.clone(),
+                            false,
+                        );
+                        ensure_output_entry(
+                            &mut state.output_entries,
+                            edited_file_path(&transcript_path),
+                            false,
+                        );
+                        if !state
+                            .media_entries
+                            .iter()
+                            .any(|entry| entry.path == recording_path)
+                        {
+                            state.media_entries.push(MediaEntry {
+                                path: recording_path.clone(),
+                                selected: false,
+                            });
+                        }
+                        state.active_audio_path = Some(recording_path.clone());
+                    }
+                    self.push_status(&format!(
+                        "Live transcription saved: {}",
+                        transcript_path.display()
+                    ));
+                    self.queue_save();
+                }
+                UiMessage::LiveSessionFailed(error) => {
+                    self.live_capture = None;
+                    self.push_status(&format!("Live transcription failed: {error}"));
+                    self.open_modal("Live transcription failed", error, true);
                     self.queue_save();
                 }
             }
@@ -2226,6 +2380,35 @@ impl UiApp {
         false
     }
 
+    fn ensure_live_model_path_for_run(&mut self) -> bool {
+        let configured = self.settings.live_transcription_model.trim();
+        if !configured.is_empty() && Path::new(configured).exists() {
+            return true;
+        }
+        if let Some(spec) = first_installed_live_model(&self.paths) {
+            let path = live_model_dest_path(&self.paths, spec.file_name);
+            self.settings.live_transcription_model = path.display().to_string();
+            self.live_models = select_live_model_index(&self.settings.live_transcription_model);
+            self.queue_save();
+            return true;
+        }
+        false
+    }
+
+    fn ensure_chat_model_path_for_run(&mut self) -> bool {
+        if let Some(path) =
+            resolve_chat_model_path_from_store(&self.paths, self.settings.chat_model.trim())
+        {
+            let resolved = path.display().to_string();
+            if self.settings.chat_model != resolved {
+                self.settings.chat_model = resolved;
+                self.queue_save();
+            }
+            return true;
+        }
+        false
+    }
+
     fn runtime_setup_issues(&self) -> Vec<String> {
         let mut issues = Vec::new();
         if !has_any_installed_whisper_model(&self.paths) {
@@ -2237,7 +2420,7 @@ impl UiApp {
         let missing = missing_diarization_files(diar_dir);
         if !missing.is_empty() {
             issues.push(format!(
-                "Diarization model pack is incomplete. Missing: {}.",
+                "Sortformer diarization model is missing. Required file: {}.",
                 missing.join(", ")
             ));
         }
@@ -2252,6 +2435,32 @@ impl UiApp {
         }
         self.show_runtime_missing_window = true;
         self.push_status(&format!("Transcription blocked: {}", issues.join(" | ")));
+        false
+    }
+
+    fn ensure_live_setup_ready(&mut self) -> bool {
+        let mut issues = Vec::new();
+        if !self.ensure_live_model_path_for_run() {
+            issues.push(
+                "No realtime Voxtral model installed. Download one in Runtime Setup.".to_string(),
+            );
+        }
+        let diar_missing =
+            missing_diarization_files(Path::new(self.settings.diarization_models_dir.trim()));
+        if self.settings.live_diarization_enabled && !diar_missing.is_empty() {
+            issues.push(format!(
+                "Live diarization requires the Sortformer model: {}.",
+                diar_missing.join(", ")
+            ));
+        }
+        if issues.is_empty() {
+            return true;
+        }
+        self.show_runtime_settings = true;
+        self.push_status(&format!(
+            "Live transcription blocked: {}",
+            issues.join(" | ")
+        ));
         false
     }
 
@@ -2318,6 +2527,7 @@ impl UiApp {
 
     fn ui_runtime_models_panel(&mut self, ui: &mut egui::Ui, include_chat_model: bool) {
         let whisper_any_installed = has_any_installed_whisper_model(&self.paths);
+        let live_any_installed = has_any_installed_live_model(&self.paths);
         engine_panel_frame().show(ui, |ui| {
             ui.heading("Whisper Model *");
             ui.horizontal(|ui| {
@@ -2375,14 +2585,69 @@ impl UiApp {
         });
 
         engine_panel_frame().show(ui, |ui| {
-            ui.heading("Diarization Models (Pyannote GGUF) *");
+            ui.heading("Realtime Voxtral Model (Live Tab)");
+            ui.horizontal(|ui| {
+                ui.label("Realtime model:");
+                egui::ComboBox::from_id_salt("live_model_runtime_settings")
+                    .selected_text(
+                        LIVE_TRANSCRIPTION_MODELS
+                            .get(self.live_models)
+                            .map(|m| live_model_combo_label(&self.paths, m))
+                            .unwrap_or_else(|| "Select model".to_string()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (idx, spec) in LIVE_TRANSCRIPTION_MODELS.iter().enumerate() {
+                            ui.selectable_value(
+                                &mut self.live_models,
+                                idx,
+                                live_model_combo_label(&self.paths, spec),
+                            );
+                        }
+                    });
+                let download_clicked = if !live_any_installed {
+                    secondary_button(ui, "Download").clicked()
+                } else {
+                    accent_button(ui, "Download").clicked()
+                };
+                if download_clicked {
+                    self.do_download_live_model();
+                }
+                if ui.button("Open realtime models folder").clicked() {
+                    let _ = open::that(self.paths.live_models_dir.clone());
+                }
+            });
+            if let Some(spec) = LIVE_TRANSCRIPTION_MODELS.get(self.live_models) {
+                let selected_path = live_model_dest_path(&self.paths, spec.file_name)
+                    .display()
+                    .to_string();
+                if self.settings.live_transcription_model != selected_path {
+                    self.settings.live_transcription_model = selected_path;
+                    self.queue_save();
+                }
+            }
+            let configured_exists = Path::new(self.settings.live_transcription_model.trim()).exists();
+            if live_any_installed {
+                if configured_exists {
+                    ui.label("Installed in your app data realtime models folder.");
+                } else {
+                    ui.label(
+                        "Installed (at least one realtime model). Choose an installed model or download selected.",
+                    );
+                }
+            } else {
+                ui.label("Optional for the Live tab. Download a Voxtral model to enable microphone transcription.");
+            }
+        });
+
+        engine_panel_frame().show(ui, |ui| {
+            ui.heading("Diarization Model (Sortformer GGUF) *");
             let missing =
                 missing_diarization_files(Path::new(self.settings.diarization_models_dir.trim()));
             ui.horizontal(|ui| {
                 let download_clicked = if missing.is_empty() {
-                    accent_button(ui, "Download diarization pack").clicked()
+                    accent_button(ui, "Download Sortformer model").clicked()
                 } else {
-                    warning_button(ui, "Download diarization pack (required)").clicked()
+                    warning_button(ui, "Download Sortformer model (required)").clicked()
                 };
                 if download_clicked {
                     self.do_download_diarization();
@@ -2396,7 +2661,7 @@ impl UiApp {
             } else {
                 ui.colored_label(
                     egui::Color32::from_rgb(160, 25, 25),
-                    format!("Missing {} file(s): {}", missing.len(), missing.join(", ")),
+                    format!("Missing required file: {}", missing.join(", ")),
                 );
             }
         });
@@ -2494,9 +2759,11 @@ impl UiApp {
     }
 
     fn do_pick_chat_model(&mut self) {
+        let models_dir = self.paths.models_dir.clone();
         if let Some(path) = self.safe_dialog_call("Select chat model file", || {
             FileDialog::new()
                 .set_title("Select chat model file")
+                .set_directory(models_dir)
                 .add_filter("Model", &["gguf"])
                 .pick_file()
         }) {
@@ -2516,6 +2783,7 @@ impl UiApp {
         if !self.ensure_runtime_ready("Chat") {
             return;
         }
+        let _ = self.ensure_chat_model_path_for_run();
         if self.settings.chat_model.trim().is_empty() {
             self.open_modal("Missing model", "Select chat model first.", true);
             self.push_status("Select chat model first.");
@@ -2642,6 +2910,7 @@ impl UiApp {
         if !self.ensure_runtime_ready("Anonymise") {
             return;
         }
+        let _ = self.ensure_chat_model_path_for_run();
         if self.settings.chat_model.trim().is_empty() {
             self.open_modal(
                 "Missing chat model",
@@ -2830,6 +3099,22 @@ impl UiApp {
         self.push_status(&format!("Downloading {}", spec.label));
     }
 
+    fn do_download_live_model(&mut self) {
+        let spec = LIVE_TRANSCRIPTION_MODELS
+            .get(self.live_models)
+            .copied()
+            .unwrap_or(LIVE_TRANSCRIPTION_MODELS[0]);
+        let dest = live_model_dest_path(&self.paths, spec.file_name);
+        start_live_model_download(
+            self.tx.clone(),
+            self.runtime_state.clone(),
+            spec.label.to_string(),
+            spec.url.to_string(),
+            dest,
+        );
+        self.push_status(&format!("Downloading realtime model {}", spec.label));
+    }
+
     fn do_download_diarization(&mut self) {
         let dir = if self.settings.diarization_models_dir.trim().is_empty() {
             let default = default_diarization_models_dir(&self.paths);
@@ -3014,6 +3299,187 @@ impl UiApp {
         self.is_transcribing = true;
         self.push_status(&format!("Queued job #{enqueue_id}."));
         start_queue_worker_if_needed(self.runtime_state.clone(), self.tx.clone());
+    }
+
+    fn refresh_live_input_devices(&mut self) {
+        let runtime_dir = resolve_runtime_dir(Path::new(self.settings.runtime_dir.trim()));
+        self.live_input_devices = enumerate_input_device_options(&runtime_dir);
+        self.selected_live_input_device =
+            resolve_input_device_index(&self.live_input_devices, &self.settings.live_input_device);
+    }
+
+    fn do_start_live_capture(&mut self) {
+        if self.live_capture.is_some() {
+            return;
+        }
+        if !self.ensure_runtime_ready("Live transcription") {
+            return;
+        }
+        if !self.ensure_live_setup_ready() {
+            return;
+        }
+        if let Some(device) = self.live_input_devices.get(self.selected_live_input_device) {
+            self.settings.live_input_device = device.name.clone();
+        } else {
+            self.settings.live_input_device.clear();
+        }
+        self.live_text.clear();
+        self.queue_save();
+
+        match live::start_live_capture(
+            &self.paths,
+            &self.settings,
+            self.runtime_state.clone(),
+            self.tx.clone(),
+        ) {
+            Ok(capture) => {
+                self.live_input_label = capture.input_label.clone();
+                self.live_recording_path = Some(capture.recording_path.clone());
+                self.live_transcript_path = Some(capture.transcript_path.clone());
+                self.live_capture = Some(capture);
+                self.push_status("Live transcription running.");
+            }
+            Err(err) => {
+                self.push_status(&format!("Failed to start live transcription: {err}"));
+                self.open_modal("Live transcription failed", err.to_string(), true);
+            }
+        }
+    }
+
+    fn do_stop_live_capture(&mut self) {
+        if let Some(capture) = self.live_capture.take() {
+            capture
+                .stop_requested
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.push_status("Stopping live transcription...");
+        }
+    }
+
+    fn ui_live_parity(&mut self, ui: &mut egui::Ui) {
+        if self.live_input_devices.is_empty() {
+            self.refresh_live_input_devices();
+        }
+
+        let live_running = self.live_capture.is_some();
+        engine_panel_frame().show(ui, |ui| {
+            ui.heading("Live Transcription");
+            ui.label("Capture microphone audio, save the streamed PCM as WAV, and transcribe it in-process with the engine v1.9 session API.");
+            ui.separator();
+
+            ui.horizontal(|ui| {
+                ui.label("Microphone:");
+                egui::ComboBox::from_id_salt("live_input_device_combo")
+                    .selected_text(
+                        self.live_input_devices
+                            .get(self.selected_live_input_device)
+                            .map(|device| device.label.clone())
+                            .unwrap_or_else(|| "Default input".to_string()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (idx, device) in self.live_input_devices.iter().enumerate() {
+                            ui.selectable_value(
+                                &mut self.selected_live_input_device,
+                                idx,
+                                &device.label,
+                            );
+                        }
+                    });
+                if secondary_button(ui, "Refresh microphones").clicked() && !live_running {
+                    self.refresh_live_input_devices();
+                }
+            });
+
+            if let Some(device) = self.live_input_devices.get(self.selected_live_input_device) {
+                if self.settings.live_input_device != device.name {
+                    self.settings.live_input_device = device.name.clone();
+                    self.queue_save();
+                }
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Realtime model:");
+                egui::ComboBox::from_id_salt("live_tab_model_combo")
+                    .selected_text(
+                        LIVE_TRANSCRIPTION_MODELS
+                            .get(self.live_models)
+                            .map(|spec| live_model_combo_label(&self.paths, spec))
+                            .unwrap_or_else(|| "Select model".to_string()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (idx, spec) in LIVE_TRANSCRIPTION_MODELS.iter().enumerate() {
+                            ui.selectable_value(
+                                &mut self.live_models,
+                                idx,
+                                live_model_combo_label(&self.paths, spec),
+                            );
+                        }
+                    });
+                if secondary_button(ui, "Download model").clicked() && !live_running {
+                    self.do_download_live_model();
+                }
+            });
+
+            if let Some(spec) = LIVE_TRANSCRIPTION_MODELS.get(self.live_models) {
+                let selected_path = live_model_dest_path(&self.paths, spec.file_name)
+                    .display()
+                    .to_string();
+                if self.settings.live_transcription_model != selected_path {
+                    self.settings.live_transcription_model = selected_path;
+                    self.queue_save();
+                }
+            }
+
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(
+                        &mut self.settings.live_diarization_enabled,
+                        "Enable live diarization (Sortformer)",
+                    )
+                    .changed()
+                {
+                    self.queue_save();
+                }
+                if ui.button("Open live sessions folder").clicked() {
+                    let _ = open::that(self.paths.live_sessions_dir.clone());
+                }
+            });
+
+            ui.horizontal(|ui| {
+                if !live_running {
+                    if accent_button(ui, "Start recording").clicked() {
+                        self.do_start_live_capture();
+                    }
+                } else if warning_button(ui, "Stop").clicked() {
+                    self.do_stop_live_capture();
+                }
+                ui.label(if live_running {
+                    "Session active."
+                } else {
+                    "Session idle."
+                });
+            });
+
+            if let Some(path) = &self.live_recording_path {
+                ui.label(format!("Recording WAV: {}", path.display()));
+            }
+            if let Some(path) = &self.live_transcript_path {
+                ui.label(format!("Transcript output: {}", path.display()));
+            }
+            if !self.live_input_label.trim().is_empty() {
+                ui.label(format!("Current input: {}", self.live_input_label));
+            }
+        });
+
+        ui.separator();
+        engine_panel_frame().show(ui, |ui| {
+            ui.heading("Live Output");
+            ui.label("Rolling live preview. Saved transcript formatting is kept separately.");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.live_text)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(28),
+            );
+        });
     }
 
     fn chat_source_candidates(&self) -> Vec<PathBuf> {
@@ -3290,27 +3756,15 @@ impl UiApp {
                 self.queue_save();
             }
 
-            ui.label("Speakers:");
-            ui.add_enabled_ui(
-                self.settings.mode.eq_ignore_ascii_case("transcript"),
-                |ui| {
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.settings.speaker_count)
-                                .desired_width(54.0),
-                        )
-                        .changed()
-                    {
-                        self.queue_save();
-                    }
-                },
-            );
             ui.add_space(8.0);
             ui.label(self.mode_note_text_parity());
             ui.add_space(6.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if tab_button(ui, "Chat", self.tab == 1).clicked() {
                     self.tab = 1;
+                }
+                if tab_button(ui, "Live", self.tab == 2).clicked() {
+                    self.tab = 2;
                 }
                 if tab_button(ui, "Transcription", self.tab == 0).clicked() {
                     self.tab = 0;
@@ -3900,21 +4354,23 @@ impl UiApp {
                             ui.allocate_space(egui::vec2(ui.available_width(), list_height - 10.0));
                         } else {
                             for (idx, entry) in entries.iter().enumerate() {
-                                ui.horizontal(|ui| {
-                                    let mut selected = entry.selected;
-                                    if ui.checkbox(&mut selected, "").changed() {
-                                        updates.push((idx, selected));
-                                    }
-                                    if ui
-                                        .selectable_label(
-                                            self.selected_media_row == Some(idx),
-                                            entry.path.display().to_string(),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.selected_media_row = Some(idx);
-                                        selected_audio = Some(entry.path.clone());
-                                    }
+                                ui.push_id(("media_entry", idx), |ui| {
+                                    ui.horizontal(|ui| {
+                                        let mut selected = entry.selected;
+                                        if ui.checkbox(&mut selected, "").changed() {
+                                            updates.push((idx, selected));
+                                        }
+                                        if ui
+                                            .selectable_label(
+                                                self.selected_media_row == Some(idx),
+                                                entry.path.display().to_string(),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.selected_media_row = Some(idx);
+                                            selected_audio = Some(entry.path.clone());
+                                        }
+                                    });
                                 });
                             }
                         }
@@ -3955,25 +4411,27 @@ impl UiApp {
                             ui.allocate_space(egui::vec2(ui.available_width(), list_height - 10.0));
                         } else {
                             for (idx, entry) in entries.iter().enumerate() {
-                                ui.horizontal(|ui| {
-                                    let mut selected = entry.selected;
-                                    if ui.checkbox(&mut selected, "").changed() {
-                                        updates.push((idx, selected));
-                                        if selected {
+                                ui.push_id(("output_entry", idx), |ui| {
+                                    ui.horizontal(|ui| {
+                                        let mut selected = entry.selected;
+                                        if ui.checkbox(&mut selected, "").changed() {
+                                            updates.push((idx, selected));
+                                            if selected {
+                                                self.selected_output_row = Some(idx);
+                                                output_to_open = Some(entry.path.clone());
+                                            }
+                                        }
+                                        if ui
+                                            .selectable_label(
+                                                self.selected_output_row == Some(idx),
+                                                entry.path.display().to_string(),
+                                            )
+                                            .clicked()
+                                        {
                                             self.selected_output_row = Some(idx);
                                             output_to_open = Some(entry.path.clone());
                                         }
-                                    }
-                                    if ui
-                                        .selectable_label(
-                                            self.selected_output_row == Some(idx),
-                                            entry.path.display().to_string(),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.selected_output_row = Some(idx);
-                                        output_to_open = Some(entry.path.clone());
-                                    }
+                                    });
                                 });
                             }
                         }
@@ -4983,6 +5441,7 @@ impl UiApp {
                     self.ui_transcription_parity(ui);
                 }
                 1 => self.ui_chat_parity(ui),
+                2 => self.ui_live_parity(ui),
                 _ => {}
             });
 
@@ -5012,6 +5471,7 @@ impl UiApp {
         if self.is_transcribing
             || self.is_chatting
             || self.anonymise_running
+            || self.live_capture.is_some()
             || self.playback_decode_in_progress
             || playback_is_playing(&self.playback)
             || (self.editing_enabled && self.edit_pause_until.is_some())
@@ -5191,6 +5651,42 @@ fn select_whisper_model_index(whisper_model: &str) -> usize {
                     .iter()
                     .position(|spec| spec.file_name.eq_ignore_ascii_case(whisper_model))
             })
+            .unwrap_or(0)
+    }
+}
+
+fn append_live_preview_text(target: &mut String, chunk: &str) {
+    let chunk = chunk.trim();
+    if chunk.is_empty() {
+        return;
+    }
+
+    let needs_space = if target.is_empty() || target.ends_with(char::is_whitespace) {
+        false
+    } else {
+        !matches!(
+            chunk.chars().next(),
+            Some('.' | ',' | ';' | '?' | '!' | ':' | ')' | ']' | '}' | '\'' | '"')
+        )
+    };
+
+    if needs_space {
+        target.push(' ');
+    }
+    target.push_str(chunk);
+}
+
+fn select_live_model_index(live_model: &str) -> usize {
+    if live_model.trim().is_empty() {
+        0
+    } else {
+        let file_name = Path::new(live_model)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(live_model);
+        LIVE_TRANSCRIPTION_MODELS
+            .iter()
+            .position(|spec| spec.file_name.eq_ignore_ascii_case(file_name))
             .unwrap_or(0)
     }
 }
@@ -6732,6 +7228,21 @@ fn main() {
         options,
         Box::new(move |_| Ok(Box::new(UiApp::new(paths)))),
     );
+}
+
+#[cfg(target_os = "windows")]
+fn audio_capture_library_file_name() -> &'static str {
+    "llama-server-audio.dll"
+}
+
+#[cfg(target_os = "macos")]
+fn audio_capture_library_file_name() -> &'static str {
+    "libllama-server-audio.dylib"
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn audio_capture_library_file_name() -> &'static str {
+    "libllama-server-audio.so"
 }
 
 include!("main_backend_tail.rs");
