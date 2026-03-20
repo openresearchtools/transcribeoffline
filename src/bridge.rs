@@ -23,6 +23,7 @@ pub struct llama_server_bridge_audio_session {
 pub struct llama_server_bridge_params {
     pub model_path: *const c_char,
     pub mmproj_path: *const c_char,
+    pub cluster_instance_name: *const c_char,
     pub n_ctx: i32,
     pub n_batch: i32,
     pub n_ubatch: i32,
@@ -38,6 +39,11 @@ pub struct llama_server_bridge_params {
     pub seed: i32,
     pub ctx_shift: i32,
     pub kv_unified: i32,
+    pub use_mmap: i32,
+    pub use_direct_io: i32,
+    pub use_mlock: i32,
+    pub no_host: i32,
+    pub no_extra_bufts: i32,
     pub devices: *const c_char,
     pub tensor_split: *const c_char,
     pub split_mode: i32,
@@ -786,6 +792,7 @@ impl BridgeApi {
         let mut params = unsafe { (self.default_params)() };
         params.model_path = model_c.as_ptr();
         params.mmproj_path = ptr::null();
+        params.cluster_instance_name = ptr::null();
         params.n_ctx = shared.n_ctx;
         params.n_batch = shared.n_batch;
         params.n_ubatch = shared.n_ubatch;
@@ -817,22 +824,30 @@ impl BridgeApi {
         params.embedding = 0;
         params.reranking = 0;
 
-        let prev_audio_only_env = if audio_only_mode {
-            std::env::var("LLAMA_SERVER_AUDIO_ONLY").ok()
+        struct EnvRestoreGuard {
+            key: &'static str,
+            prev: Option<String>,
+        }
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                if let Some(v) = &self.prev {
+                    std::env::set_var(self.key, v);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+        let _audio_only_restore = if audio_only_mode {
+            let prev = std::env::var("LLAMA_SERVER_AUDIO_ONLY").ok();
+            std::env::set_var("LLAMA_SERVER_AUDIO_ONLY", "1");
+            Some(EnvRestoreGuard {
+                key: "LLAMA_SERVER_AUDIO_ONLY",
+                prev,
+            })
         } else {
             None
         };
-        if audio_only_mode {
-            std::env::set_var("LLAMA_SERVER_AUDIO_ONLY", "1");
-        }
         let ptr = self.with_runtime_cwd(|| unsafe { (self.create)(&params) })?;
-        if audio_only_mode {
-            if let Some(v) = prev_audio_only_env {
-                std::env::set_var("LLAMA_SERVER_AUDIO_ONLY", v);
-            } else {
-                std::env::remove_var("LLAMA_SERVER_AUDIO_ONLY");
-            }
-        }
         if ptr.is_null() {
             bail!("llama_server_bridge_create returned null");
         }

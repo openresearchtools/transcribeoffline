@@ -101,9 +101,10 @@ impl DiarizedTranscriptOrchestrator {
             _ => {}
         }
 
-        if changed && !self.active_spans().is_empty() && !self.pieces.is_empty() {
+        let assembly_spans = self.assembly_spans();
+        if changed && !assembly_spans.is_empty() && !self.pieces.is_empty() {
             self.turns = assemble_turns_with_words(
-                self.active_spans(),
+                &assembly_spans,
                 &self.pieces,
                 &self.words,
                 &self.options,
@@ -127,6 +128,19 @@ impl DiarizedTranscriptOrchestrator {
         } else {
             &self.preview_spans
         }
+    }
+
+    fn assembly_spans(&self) -> Vec<SpeakerSpan> {
+        if !self.final_spans.is_empty() {
+            return self.final_spans.clone();
+        }
+        if self.preview_spans.len() <= 1 {
+            return Vec::new();
+        }
+
+        let mut stable_preview_spans = self.preview_spans.clone();
+        stable_preview_spans.pop();
+        stable_preview_spans
     }
 }
 
@@ -154,4 +168,81 @@ fn insert_unique_piece(pieces: &mut Vec<TranscriptPiece>, piece: TranscriptPiece
     pieces.push(piece);
     pieces.sort_by_key(|item| (item.start_sample, item.end_sample));
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::{
+        AUDIO_EVENT_FLAG_PREVIEW, AUDIO_EVENT_FLAG_SNAPSHOT_END, AUDIO_EVENT_FLAG_SNAPSHOT_START,
+    };
+
+    fn make_event(
+        kind: i32,
+        flags: u32,
+        start_sample: u64,
+        end_sample: u64,
+        text: &str,
+    ) -> AudioSessionEvent {
+        AudioSessionEvent {
+            seq_no: 0,
+            kind,
+            flags,
+            start_sample,
+            end_sample,
+            speaker_id: -1,
+            item_id: 0,
+            text: text.to_string(),
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn preview_holds_latest_provisional_span_as_unassigned_tail() {
+        let mut orchestrator = DiarizedTranscriptOrchestrator::new(16_000);
+
+        orchestrator.ingest_event(&make_event(
+            AUDIO_EVENT_DIARIZATION_SPAN_COMMIT,
+            AUDIO_EVENT_FLAG_PREVIEW | AUDIO_EVENT_FLAG_SNAPSHOT_START,
+            0,
+            16_000,
+            "SPEAKER_00",
+        ));
+        orchestrator.ingest_event(&make_event(
+            AUDIO_EVENT_DIARIZATION_SPAN_COMMIT,
+            AUDIO_EVENT_FLAG_PREVIEW | AUDIO_EVENT_FLAG_SNAPSHOT_END,
+            16_000,
+            32_000,
+            "SPEAKER_01",
+        ));
+
+        orchestrator.ingest_event(&make_event(
+            AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT,
+            0,
+            0,
+            8_000,
+            "Stable intro.",
+        ));
+        orchestrator.ingest_event(&make_event(
+            AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT,
+            0,
+            16_000,
+            20_000,
+            "tail keeps",
+        ));
+        orchestrator.ingest_event(&make_event(
+            AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT,
+            0,
+            20_000,
+            24_000,
+            "moving forward",
+        ));
+
+        let markdown = orchestrator.snapshot().markdown;
+        assert!(markdown.contains("### SPEAKER_00"));
+        assert!(markdown.contains("Stable intro."));
+        assert!(markdown.contains("### UNASSIGNED"));
+        assert!(markdown.contains("tail keeps moving forward"));
+        assert!(!markdown.contains("### SPEAKER_01 [00:01.000 - 00:02.000]"));
+    }
 }

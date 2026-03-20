@@ -852,20 +852,31 @@ enum UiMessage {
     ChatModelInstalled(PathBuf),
     DiarizationInstalled(PathBuf),
     LiveSessionStarted {
+        session_id: u64,
         input_device: String,
         recording_path: PathBuf,
         transcript_path: PathBuf,
     },
-    LiveTextAppend(String),
-    LiveTextSet(String),
+    LiveTextAppend {
+        session_id: u64,
+        chunk: String,
+    },
+    LiveTextSet {
+        session_id: u64,
+        text: String,
+    },
     LiveSessionFinished {
+        session_id: u64,
         input_device: String,
         recording_path: PathBuf,
         transcript_path: PathBuf,
         transcript_text: String,
         preview_text: String,
     },
-    LiveSessionFailed(String),
+    LiveSessionFailed {
+        session_id: u64,
+        error: String,
+    },
 }
 
 #[derive(Clone)]
@@ -1026,6 +1037,7 @@ struct UiApp {
     manual_edit_scroll_sync_y: Option<f32>,
     speaker_rename_entries: Vec<SpeakerRenameEntry>,
     live_capture: Option<ActiveLiveCapture>,
+    live_session_id: Option<u64>,
     live_text: String,
     live_recording_path: Option<PathBuf>,
     live_transcript_path: Option<PathBuf>,
@@ -1215,6 +1227,7 @@ impl UiApp {
             manual_edit_scroll_sync_y: None,
             speaker_rename_entries: Vec::new(),
             live_capture: None,
+            live_session_id: None,
             live_text: String::new(),
             live_recording_path: None,
             live_transcript_path: None,
@@ -2326,29 +2339,44 @@ impl UiApp {
                     self.queue_save();
                 }
                 UiMessage::LiveSessionStarted {
+                    session_id,
                     input_device,
                     recording_path,
                     transcript_path,
                 } => {
+                    if self.live_session_id != Some(session_id) {
+                        continue;
+                    }
                     self.live_input_label = input_device;
                     self.live_recording_path = Some(recording_path);
                     self.live_transcript_path = Some(transcript_path);
                     self.live_text.clear();
                 }
-                UiMessage::LiveTextAppend(chunk) => {
+                UiMessage::LiveTextAppend { session_id, chunk } => {
+                    if self.live_session_id != Some(session_id) {
+                        continue;
+                    }
                     append_live_preview_text(&mut self.live_text, &chunk);
                 }
-                UiMessage::LiveTextSet(text) => {
+                UiMessage::LiveTextSet { session_id, text } => {
+                    if self.live_session_id != Some(session_id) {
+                        continue;
+                    }
                     self.live_text = text;
                 }
                 UiMessage::LiveSessionFinished {
+                    session_id,
                     input_device,
                     recording_path,
                     transcript_path,
                     transcript_text: _,
                     preview_text,
                 } => {
+                    if self.live_session_id != Some(session_id) {
+                        continue;
+                    }
                     self.live_capture = None;
+                    self.live_session_id = None;
                     self.live_input_label = input_device;
                     self.live_recording_path = Some(recording_path.clone());
                     self.live_transcript_path = Some(transcript_path.clone());
@@ -2384,8 +2412,12 @@ impl UiApp {
                     ));
                     self.queue_save();
                 }
-                UiMessage::LiveSessionFailed(error) => {
+                UiMessage::LiveSessionFailed { session_id, error } => {
+                    if self.live_session_id != Some(session_id) {
+                        continue;
+                    }
                     self.live_capture = None;
+                    self.live_session_id = None;
                     self.push_status(&format!("Live transcription failed: {error}"));
                     self.open_modal("Live transcription failed", error, true);
                     self.queue_save();
@@ -3533,6 +3565,7 @@ impl UiApp {
             self.tx.clone(),
         ) {
             Ok(capture) => {
+                self.live_session_id = Some(capture.session_id);
                 self.live_input_label = capture.input_label.clone();
                 self.live_recording_path = Some(capture.recording_path.clone());
                 self.live_transcript_path = Some(capture.transcript_path.clone());
@@ -3629,7 +3662,8 @@ impl UiApp {
                 }
             }
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("WebRTC cleanup / normalization stays enabled for live capture.");
                 if ui
                     .checkbox(
                         &mut self.settings.live_diarization_enabled,
@@ -3643,6 +3677,8 @@ impl UiApp {
                     let _ = open::that(self.paths.live_sessions_dir.clone());
                 }
             });
+
+            ui.label("Live capture always uses the backend WebRTC cleanup path before the mono 16 kHz realtime runtime.");
 
             ui.horizontal(|ui| {
                 if !live_running {
@@ -3674,11 +3710,27 @@ impl UiApp {
         engine_panel_frame().show(ui, |ui| {
             ui.heading("Live Output");
             ui.label("Rolling live preview. Saved transcript formatting is kept separately.");
-            ui.add(
-                egui::TextEdit::multiline(&mut self.live_text)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(28),
-            );
+            let min_height = ui.text_style_height(&egui::TextStyle::Monospace) * 28.0;
+            egui::ScrollArea::vertical()
+                .id_salt("live_output_scroll")
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.set_min_height(min_height);
+                    let mut live_text_view = self.live_text.as_str();
+                    let output = egui::TextEdit::multiline(&mut live_text_view)
+                        .id_salt("live_output_text")
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .min_size(egui::vec2(ui.available_width(), min_height))
+                        .show(ui);
+                    attach_text_copy_context_menu(
+                        &output.response,
+                        self.live_text.as_str(),
+                        output.cursor_range,
+                    );
+                    maybe_autoscroll_text_selection(ui, &output);
+                });
         });
     }
 
@@ -4557,19 +4609,24 @@ impl UiApp {
                                 ui.push_id(("media_entry", idx), |ui| {
                                     ui.horizontal(|ui| {
                                         let mut selected = entry.selected;
+                                        let row_label = entry
+                                            .path
+                                            .file_name()
+                                            .and_then(|name| name.to_str())
+                                            .map(|name| name.to_string())
+                                            .unwrap_or_else(|| entry.path.display().to_string());
                                         if ui.checkbox(&mut selected, "").changed() {
                                             updates.push((idx, selected));
                                         }
-                                        if ui
-                                            .selectable_label(
-                                                self.selected_media_row == Some(idx),
-                                                entry.path.display().to_string(),
-                                            )
-                                            .clicked()
-                                        {
+                                        let response = ui.selectable_label(
+                                            self.selected_media_row == Some(idx),
+                                            row_label,
+                                        );
+                                        if response.clicked() {
                                             self.selected_media_row = Some(idx);
                                             selected_audio = Some(entry.path.clone());
                                         }
+                                        response.on_hover_text(entry.path.display().to_string());
                                     });
                                 });
                             }
@@ -4614,6 +4671,12 @@ impl UiApp {
                                 ui.push_id(("output_entry", idx), |ui| {
                                     ui.horizontal(|ui| {
                                         let mut selected = entry.selected;
+                                        let row_label = entry
+                                            .path
+                                            .file_name()
+                                            .and_then(|name| name.to_str())
+                                            .map(|name| name.to_string())
+                                            .unwrap_or_else(|| entry.path.display().to_string());
                                         if ui.checkbox(&mut selected, "").changed() {
                                             updates.push((idx, selected));
                                             if selected {
@@ -4621,16 +4684,15 @@ impl UiApp {
                                                 output_to_open = Some(entry.path.clone());
                                             }
                                         }
-                                        if ui
-                                            .selectable_label(
-                                                self.selected_output_row == Some(idx),
-                                                entry.path.display().to_string(),
-                                            )
-                                            .clicked()
-                                        {
+                                        let response = ui.selectable_label(
+                                            self.selected_output_row == Some(idx),
+                                            row_label,
+                                        );
+                                        if response.clicked() {
                                             self.selected_output_row = Some(idx);
                                             output_to_open = Some(entry.path.clone());
                                         }
+                                        response.on_hover_text(entry.path.display().to_string());
                                     });
                                 });
                             }
@@ -4762,40 +4824,38 @@ impl UiApp {
         let transcript_panel_height = ui.available_height().max(320.0);
         engine_panel_frame().show(ui, |ui| {
             ui.set_min_height(transcript_panel_height);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.heading("Transcript");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let info = ui.small_button("i");
-                    info.on_hover_text(ANONYMISE_TOOLTIP);
-                    if self.anonymise_running {
-                        ui.add_enabled(false, egui::Button::new("Anonymise (beta)"));
-                    } else if accent_button(ui, "Anonymise (beta)").clicked() {
-                        self.show_anonymise_window = true;
-                    }
-                    if secondary_button(ui, "Rename speakers").clicked() {
-                        self.open_speaker_rename_window();
-                    }
-                    let label = if self.editing_enabled {
-                        "Stop editing"
-                    } else {
-                        "Edit"
-                    };
-                    let can_start_editing = self
-                        .selected_output_path()
+                let info = ui.small_button("i");
+                info.on_hover_text(ANONYMISE_TOOLTIP);
+                if self.anonymise_running {
+                    ui.add_enabled(false, egui::Button::new("Anonymise (beta)"));
+                } else if accent_button(ui, "Anonymise (beta)").clicked() {
+                    self.show_anonymise_window = true;
+                }
+                if secondary_button(ui, "Rename speakers").clicked() {
+                    self.open_speaker_rename_window();
+                }
+                let label = if self.editing_enabled {
+                    "Stop editing"
+                } else {
+                    "Edit"
+                };
+                let can_start_editing = self
+                    .selected_output_path()
+                    .map(|path| path.exists())
+                    .unwrap_or(false)
+                    || self
+                        .transcript_output_path
+                        .as_ref()
                         .map(|path| path.exists())
-                        .unwrap_or(false)
-                        || self
-                            .transcript_output_path
-                            .as_ref()
-                            .map(|path| path.exists())
-                            .unwrap_or(false);
-                    let edit_enabled = self.editing_enabled || can_start_editing;
-                    if edit_enabled && accent_button(ui, label).clicked() {
-                        self.toggle_editing();
-                    } else if !edit_enabled {
-                        ui.add_enabled(false, egui::Button::new(label));
-                    }
-                });
+                        .unwrap_or(false);
+                let edit_enabled = self.editing_enabled || can_start_editing;
+                if edit_enabled && accent_button(ui, label).clicked() {
+                    self.toggle_editing();
+                } else if !edit_enabled {
+                    ui.add_enabled(false, egui::Button::new(label));
+                }
             });
             if !self.editing_enabled && self.transcript_output_path.is_none() {
                 ui.label("Select an output transcript in the results list to enable editing.");
@@ -4859,21 +4919,22 @@ impl UiApp {
                                         highlight_range,
                                     )
                                 };
-                            let output = egui::TextEdit::multiline(&mut self.transcription_text)
+                            let mut transcript_view = self.transcription_text.as_str();
+                            let output = egui::TextEdit::multiline(&mut transcript_view)
                                 .id_salt("original_transcript_text")
                                 .font(egui::TextStyle::Body)
                                 .desired_width(f32::INFINITY)
                                 .min_size(egui::vec2(ui.available_width(), transcript_height))
-                                .interactive(false)
                                 .layouter(&mut layouter)
                                 .show(ui);
-                            let seek_overlay = ui.interact(
-                                output.response.rect,
-                                ui.make_persistent_id("original_transcript_seek_overlay"),
-                                egui::Sense::click(),
+                            attach_text_copy_context_menu(
+                                &output.response,
+                                self.transcription_text.as_str(),
+                                output.cursor_range,
                             );
-                            if seek_overlay.clicked() || seek_overlay.double_clicked() {
-                                if let Some(pointer_pos) = seek_overlay.interact_pointer_pos() {
+                            maybe_autoscroll_text_selection(ui, &output);
+                            if output.response.double_clicked() {
+                                if let Some(pointer_pos) = output.response.interact_pointer_pos() {
                                     let cursor = output
                                         .galley
                                         .cursor_from_pos(pointer_pos - output.galley_pos);
@@ -4939,6 +5000,12 @@ impl UiApp {
                                 .min_size(egui::vec2(ui.available_width(), transcript_height))
                                 .layouter(&mut layouter)
                                 .show(ui);
+                            attach_text_copy_context_menu(
+                                &output.response,
+                                self.edited_text.as_str(),
+                                output.cursor_range,
+                            );
+                            maybe_autoscroll_text_selection(ui, &output);
 
                             if output.response.clicked() {
                                 let delay =
@@ -5029,6 +5096,7 @@ impl UiApp {
                 engine_panel_frame().show(ui, |ui| {
                     ui.set_min_height(transcript_height);
                     ui.set_max_height(transcript_height);
+                    let highlight_range = active_range;
                     let scroll_output = egui::ScrollArea::vertical()
                         .id_salt("original_transcript_lines")
                         .auto_shrink([false, false])
@@ -5043,16 +5111,56 @@ impl UiApp {
                                     (transcript_height - 8.0).max(0.0),
                                 ));
                             } else {
-                                for (line_idx, line) in transcript_lines.iter().enumerate() {
-                                    let active = active_range
-                                        .map(|(start, end)| line_idx >= start && line_idx < end)
-                                        .unwrap_or(current_line == Some(line_idx));
-                                    let response = transcript_line_label(ui, line, active);
-                                    if response.clicked() {
+                                let mut transcript_view = self.transcription_text.as_str();
+                                let mut layouter =
+                                    move |ui: &egui::Ui,
+                                          text: &dyn egui::TextBuffer,
+                                          wrap_width: f32| {
+                                        layouter_with_omitted_highlights(
+                                            ui,
+                                            text.as_str(),
+                                            wrap_width,
+                                            highlight_range,
+                                        )
+                                    };
+                                let output = egui::TextEdit::multiline(&mut transcript_view)
+                                    .id_salt("original_transcript_view")
+                                    .font(egui::TextStyle::Body)
+                                    .desired_width(f32::INFINITY)
+                                    .min_size(egui::vec2(ui.available_width(), transcript_height))
+                                    .layouter(&mut layouter)
+                                    .show(ui);
+                                attach_text_copy_context_menu(
+                                    &output.response,
+                                    self.transcription_text.as_str(),
+                                    output.cursor_range,
+                                );
+                                maybe_autoscroll_text_selection(ui, &output);
+                                if output.response.double_clicked() {
+                                    if let Some(pointer_pos) = output.response.interact_pointer_pos()
+                                    {
+                                        let cursor = output
+                                            .galley
+                                            .cursor_from_pos(pointer_pos - output.galley_pos);
+                                        let line_idx = char_index_to_line_index(
+                                            &self.transcription_text,
+                                            cursor.index,
+                                        );
                                         self.seek_to_line(line_idx);
                                     }
-                                    if active && !follow_paused && Some(line_idx) == active_anchor {
-                                        response.scroll_to_me(Some(egui::Align::Center));
+                                }
+                                if !follow_paused {
+                                    if let Some(line_idx) = active_anchor {
+                                        let char_idx = line_start_char_index(
+                                            &self.transcription_text,
+                                            line_idx,
+                                        );
+                                        let cursor = egui::text::CCursor::new(char_idx);
+                                        let cursor_rect = output
+                                            .galley
+                                            .pos_from_cursor(cursor)
+                                            .translate(output.galley_pos.to_vec2());
+                                        ui.scroll_to_rect(cursor_rect, Some(egui::Align::Center));
                                     }
                                 }
                             }
@@ -6112,7 +6220,83 @@ fn transcript_line_label(ui: &mut egui::Ui, line: &str, active: bool) -> egui::R
     } else {
         egui::RichText::new(line)
     };
-    ui.add(egui::Label::new(text).sense(egui::Sense::click()))
+    ui.add(
+        egui::Label::new(text)
+            .wrap_mode(egui::TextWrapMode::Wrap)
+            .sense(egui::Sense::click()),
+    )
+}
+
+fn selected_text_from_cursor_range(
+    text: &str,
+    cursor_range: Option<egui::text::CCursorRange>,
+) -> Option<String> {
+    let range = cursor_range?.as_sorted_char_range();
+    if range.start == range.end {
+        return None;
+    }
+    Some(
+        text.chars()
+            .skip(range.start)
+            .take(range.end.saturating_sub(range.start))
+            .collect(),
+    )
+}
+
+fn attach_text_copy_context_menu(
+    response: &egui::Response,
+    text: &str,
+    cursor_range: Option<egui::text::CCursorRange>,
+) {
+    let selected_text = selected_text_from_cursor_range(text, cursor_range);
+    response.context_menu(|ui| {
+        if let Some(selected) = selected_text.as_ref().filter(|value| !value.is_empty()) {
+            if ui.button("Copy selected text").clicked() {
+                ui.ctx().copy_text(selected.clone());
+                ui.close();
+            }
+        }
+        if ui.button("Copy all").clicked() {
+            ui.ctx().copy_text(text.to_string());
+            ui.close();
+        }
+    });
+}
+
+fn maybe_autoscroll_text_selection(ui: &egui::Ui, output: &egui::text_edit::TextEditOutput) {
+    let Some(cursor_range) = output.cursor_range else {
+        return;
+    };
+    if !output.response.has_focus() {
+        return;
+    }
+    let Some(delta) = ui.ctx().input(|i| {
+        if !i.pointer.primary_down() {
+            return None;
+        }
+        let pointer_pos = i.pointer.interact_pos().or_else(|| i.pointer.hover_pos())?;
+        let hot_zone = 28.0;
+        let max_step = 96.0;
+        if pointer_pos.y < output.response.rect.top() + hot_zone {
+            let strength =
+                ((output.response.rect.top() + hot_zone - pointer_pos.y) / hot_zone).clamp(0.0, 1.0);
+            Some(-max_step * strength)
+        } else if pointer_pos.y > output.response.rect.bottom() - hot_zone {
+            let strength = ((pointer_pos.y - (output.response.rect.bottom() - hot_zone)) / hot_zone)
+                .clamp(0.0, 1.0);
+            Some(max_step * strength)
+        } else {
+            None
+        }
+    }) else {
+        return;
+    };
+
+    let cursor_rect = output
+        .galley
+        .pos_from_cursor(cursor_range.primary)
+        .translate(output.galley_pos.to_vec2());
+    ui.scroll_to_rect(cursor_rect.translate(egui::vec2(0.0, delta)), None);
 }
 
 fn detect_speaker_slots(text: &str) -> Vec<String> {

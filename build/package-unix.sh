@@ -138,6 +138,8 @@ if [[ "$os_name" == "Darwin" ]]; then
   <string>AppIcon.icns</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Transcribe Offline needs microphone access for live transcription and diarization.</string>
 </dict>
 </plist>
 EOF

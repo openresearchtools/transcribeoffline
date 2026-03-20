@@ -67,7 +67,13 @@ pub struct AppSettings {
     pub seek_step_growth_sec: f32,
     pub playback_toggle_offset_sec: f32,
     pub runtime_download_backend: String,
+    #[serde(default = "default_live_webrtc_enabled")]
+    pub live_webrtc_enabled: bool,
     pub live_diarization_enabled: bool,
+}
+
+fn default_live_webrtc_enabled() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -109,6 +115,7 @@ impl Default for AppSettings {
             seek_step_growth_sec: 2.0,
             playback_toggle_offset_sec: 0.0,
             runtime_download_backend: "vulkan".to_string(),
+            live_webrtc_enabled: default_live_webrtc_enabled(),
             live_diarization_enabled: true,
         }
     }
@@ -444,6 +451,7 @@ pub fn load_settings(paths: &AppPaths) -> Result<AppSettings> {
     let original_whisper_model = parsed.whisper_model.clone();
     let original_live_model = parsed.live_transcription_model.clone();
     let original_diarization_dir = parsed.diarization_models_dir.clone();
+    let original_live_webrtc_enabled = parsed.live_webrtc_enabled;
     parsed.runtime_dir = normalize_runtime_dir(parsed.runtime_dir);
     parsed.whisper_model = normalize_whisper_model_path(&parsed.whisper_model, paths);
     parsed.live_transcription_model = normalize_repo_managed_file_path(
@@ -470,10 +478,12 @@ pub fn load_settings(paths: &AppPaths) -> Result<AppSettings> {
     if parsed.diarization_models_dir.trim().is_empty() {
         parsed.diarization_models_dir = default_diarization_models_dir(paths).display().to_string();
     }
+    parsed.live_webrtc_enabled = true;
     if parsed.runtime_dir != original_runtime_dir
         || parsed.whisper_model != original_whisper_model
         || parsed.live_transcription_model != original_live_model
         || parsed.diarization_models_dir != original_diarization_dir
+        || parsed.live_webrtc_enabled != original_live_webrtc_enabled
     {
         save_settings(paths, &parsed)?;
         save_model_links(paths, &parsed.to_model_links())?;

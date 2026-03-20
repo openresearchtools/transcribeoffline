@@ -6,10 +6,12 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::audio_capture_api::{AudioCaptureApi, AudioLiveConfig, AudioLivePaths};
+use crate::audio_orchestrator::DiarizedTranscriptOrchestrator;
 use crate::bridge::{
-    AudioSessionEvent, BridgeApi, AUDIO_EVENT_DIARIZATION_TRANSCRIPT_COMMIT, AUDIO_EVENT_ERROR,
-    AUDIO_EVENT_NOTICE, AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT, REALTIME_BACKEND_SORTFORMER,
-    REALTIME_BACKEND_VOXTRAL,
+    AudioSessionEvent, BridgeApi, AUDIO_EVENT_DIARIZATION_SPAN_COMMIT,
+    AUDIO_EVENT_DIARIZATION_TRANSCRIPT_COMMIT, AUDIO_EVENT_ERROR, AUDIO_EVENT_NOTICE,
+    AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT, AUDIO_EVENT_TRANSCRIPTION_STOPPED,
+    AUDIO_EVENT_TRANSCRIPTION_WORD_COMMIT, REALTIME_BACKEND_SORTFORMER, REALTIME_BACKEND_VOXTRAL,
 };
 use crate::{
     bridge_has_device_index, resolve_bridge_device_name_by_index, selected_gpu_index_from_settings,
@@ -27,6 +29,7 @@ pub(crate) struct LiveInputDeviceOption {
 }
 
 pub(crate) struct ActiveLiveCapture {
+    pub session_id: u64,
     pub recording_path: PathBuf,
     pub transcript_path: PathBuf,
     pub input_label: String,
@@ -108,11 +111,11 @@ pub(crate) fn start_live_capture(
         None
     };
 
-    let session_stamp = SystemTime::now()
+    let session_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    let session_name = format!("live-session-{session_stamp}");
+        .as_micros() as u64;
+    let session_name = format!("live-session-{session_id}");
     let recording_path = paths
         .live_sessions_dir
         .join(format!("{session_name}.clean.wav"));
@@ -152,12 +155,14 @@ pub(crate) fn start_live_capture(
     std::thread::spawn(move || {
         if let Err(err) = live_worker(
             worker_runtime_dir,
+            session_id,
             worker_output_dir,
             worker_session_name,
             worker_capture_device_name,
             worker_live_model_path,
             worker_diarization_model_path,
             worker_backend_name,
+            true,
             worker_live_diarization_enabled,
             runtime_state,
             worker_tx.clone(),
@@ -166,11 +171,15 @@ pub(crate) fn start_live_capture(
             worker_input_label,
             worker_stop_requested,
         ) {
-            let _ = worker_tx.send(UiMessage::LiveSessionFailed(err.to_string()));
+            let _ = worker_tx.send(UiMessage::LiveSessionFailed {
+                session_id,
+                error: err.to_string(),
+            });
         }
     });
 
     Ok(ActiveLiveCapture {
+        session_id,
         recording_path,
         transcript_path,
         input_label,
@@ -180,12 +189,14 @@ pub(crate) fn start_live_capture(
 
 fn live_worker(
     runtime_dir: PathBuf,
+    session_id: u64,
     output_dir: PathBuf,
     session_name: String,
     capture_device_name: Option<String>,
     transcription_model_path: String,
     diarization_model_path: Option<String>,
     backend_name: String,
+    webrtc_enabled: bool,
     diarization_enabled: bool,
     runtime_state: Arc<Mutex<RuntimeState>>,
     tx: mpsc::Sender<UiMessage>,
@@ -223,7 +234,7 @@ fn live_worker(
         session_name,
         capture_device_name,
         bridge_push_samples: LIVE_PUSH_SAMPLES,
-        enable_webrtc: true,
+        enable_webrtc: webrtc_enabled,
         enable_transcription: true,
         enable_diarization: diarization_enabled,
         write_clean_wav: true,
@@ -265,6 +276,7 @@ fn live_worker(
     };
 
     let _ = tx.send(UiMessage::LiveSessionStarted {
+        session_id,
         input_device: input_label.clone(),
         recording_path: recording_path.clone(),
         transcript_path: transcript_path.clone(),
@@ -281,7 +293,9 @@ fn live_worker(
 
     let mut transcript_text = String::new();
     let mut preview_text = String::new();
-    let mut backend_preview_active = false;
+    let mut diarized_orchestrator =
+        diarization_enabled.then(|| DiarizedTranscriptOrchestrator::new(TARGET_SAMPLE_RATE_HZ));
+    let mut diarized_preview_active = false;
     let mut stop_called = false;
     let mut idle_after_stop = 0usize;
     let mut terminal_error = None::<String>;
@@ -316,11 +330,14 @@ fn live_worker(
         for event in events {
             handle_live_event(
                 &tx,
+                session_id,
                 &event,
                 live_config.enable_diarization,
+                diarized_orchestrator.as_mut(),
                 &mut transcript_text,
                 &mut preview_text,
-                &mut backend_preview_active,
+                &mut diarized_preview_active,
+                stop_called,
                 &mut terminal_error,
             );
         }
@@ -349,6 +366,19 @@ fn live_worker(
     if transcript_text.trim().is_empty() && !preview_text.trim().is_empty() {
         transcript_text = preview_text.clone();
     }
+    if let Some(orchestrator) = diarized_orchestrator.as_ref() {
+        let snapshot = orchestrator.snapshot();
+        if !snapshot.markdown.trim().is_empty() {
+            if let Some(preview_path) = output_paths.preview_path.as_ref() {
+                let _ = fs::write(preview_path, &snapshot.markdown);
+            }
+            let _ = fs::write(&transcript_path, &snapshot.markdown);
+            preview_text = snapshot.markdown.clone();
+            if diarization_enabled || transcript_text.trim().is_empty() {
+                transcript_text = snapshot.markdown;
+            }
+        }
+    }
 
     if let Some(message) = terminal_error {
         let _ = tx.send(UiMessage::Status(format!("Live session error: {message}")));
@@ -375,6 +405,7 @@ fn live_worker(
     }
 
     let _ = tx.send(UiMessage::LiveSessionFinished {
+        session_id,
         input_device: input_label,
         recording_path,
         transcript_path,
@@ -386,36 +417,77 @@ fn live_worker(
 
 fn handle_live_event(
     tx: &mpsc::Sender<UiMessage>,
+    session_id: u64,
     event: &AudioSessionEvent,
     diarization_enabled: bool,
+    diarized_orchestrator: Option<&mut DiarizedTranscriptOrchestrator>,
     transcript_text: &mut String,
     preview_text: &mut String,
-    backend_preview_active: &mut bool,
+    diarized_preview_active: &mut bool,
+    stop_called: bool,
     terminal_error: &mut Option<String>,
 ) {
+    if diarization_enabled {
+        if let Some(orchestrator) = diarized_orchestrator {
+            let orchestrator_changed = matches!(
+                event.kind,
+                AUDIO_EVENT_DIARIZATION_SPAN_COMMIT
+                    | AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT
+                    | AUDIO_EVENT_TRANSCRIPTION_WORD_COMMIT
+            ) && orchestrator.ingest_event(event);
+            if orchestrator_changed {
+                let snapshot = orchestrator.snapshot();
+                if !snapshot.markdown.trim().is_empty() {
+                    *diarized_preview_active = true;
+                    *preview_text = snapshot.markdown.clone();
+                    *transcript_text = snapshot.markdown.clone();
+                    let _ = tx.send(UiMessage::LiveTextSet {
+                        session_id,
+                        text: snapshot.markdown,
+                    });
+                }
+            }
+        }
+    }
+
     match event.kind {
         AUDIO_EVENT_DIARIZATION_TRANSCRIPT_COMMIT if diarization_enabled => {
-            if !event.text.trim().is_empty() {
-                *backend_preview_active = true;
+            if !event.text.trim().is_empty() && !*diarized_preview_active {
+                *diarized_preview_active = true;
                 *transcript_text = event.text.clone();
                 *preview_text = event.text.clone();
-                let _ = tx.send(UiMessage::LiveTextSet(event.text.clone()));
+                let _ = tx.send(UiMessage::LiveTextSet {
+                    session_id,
+                    text: event.text.clone(),
+                });
             }
         }
         AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT if !diarization_enabled => {
             if let Some(chunk) = preview_chunk_text(event) {
                 append_live_preview(preview_text, &chunk);
                 *transcript_text = preview_text.clone();
-                let _ = tx.send(UiMessage::LiveTextAppend(chunk));
+                let _ = tx.send(UiMessage::LiveTextAppend { session_id, chunk });
             }
         }
         AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT if diarization_enabled => {
-            if !*backend_preview_active {
+            if !*diarized_preview_active {
                 if let Some(chunk) = preview_chunk_text(event) {
                     append_live_preview(preview_text, &chunk);
                     *transcript_text = preview_text.clone();
-                    let _ = tx.send(UiMessage::LiveTextAppend(chunk));
+                    let _ = tx.send(UiMessage::LiveTextAppend { session_id, chunk });
                 }
+            }
+        }
+        AUDIO_EVENT_TRANSCRIPTION_STOPPED if !stop_called => {
+            let detail = event.detail.trim();
+            if !detail.is_empty() {
+                let _ = tx.send(UiMessage::Status(format!(
+                    "Live runtime transcription stopped unexpectedly: {detail}"
+                )));
+            } else {
+                let _ = tx.send(UiMessage::Status(
+                    "Live runtime transcription stopped unexpectedly.".to_string(),
+                ));
             }
         }
         AUDIO_EVENT_ERROR => {
