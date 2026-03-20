@@ -31,7 +31,6 @@ on:
 
 jobs:
   build:
-    if: ${{ matrix.label != 'ubuntu-x64' || inputs.include_ubuntu }}
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 60
@@ -47,10 +46,6 @@ jobs:
             runs_on: macos-14
             target: aarch64-apple-darwin
             bundle_dir: artifacts/bundles/transcribe-offline-macos-arm64
-          - label: ubuntu-x64
-            runs_on: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            bundle_dir: artifacts/bundles/transcribe-offline-ubuntu-x64
 
     steps:
       - name: Checkout
@@ -139,10 +134,77 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-ubuntu:
+    if: ${{ inputs.include_ubuntu }}
+    name: ubuntu-x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libasound2-dev \
+            libudev-dev \
+            libx11-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libwayland-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Verify bundled license docs are committed
+        shell: pwsh
+        run: |
+          $required = @(
+            "licenses/THIRD_PARTY_NOTICES_ALL.md",
+            "licenses/THIRD_PARTY_LICENSES_ALL.md",
+            "licenses/ENGINE_THIRD_PARTY_LICENSES_FULL.md"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing required bundled license document: $path"
+            }
+            $item = Get-Item -LiteralPath $path
+            if ($item.Length -le 0) {
+              throw "Bundled license document is empty: $path"
+            }
+          }
+          Write-Host "Bundled license documents are present."
+
+      - name: Package (Ubuntu)
+        shell: bash
+        run: |
+          chmod +x ./build/package-unix.sh
+          ./build/package-unix.sh \
+            --bundle-dir "artifacts/bundles/transcribe-offline-ubuntu-x64" \
+            --target "x86_64-unknown-linux-gnu" \
+            --locked
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-x64
+          path: artifacts/bundles/transcribe-offline-ubuntu-x64
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: Publish Release Assets
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true
-    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release == true && needs.build.result == 'success' && (needs.build-ubuntu.result == 'success' || needs.build-ubuntu.result == 'skipped') }}
+    needs:
+      - build
+      - build-ubuntu
     runs-on: ubuntu-24.04
     permissions:
       contents: write
