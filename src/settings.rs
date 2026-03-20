@@ -70,10 +70,16 @@ pub struct AppSettings {
     #[serde(default = "default_live_webrtc_enabled")]
     pub live_webrtc_enabled: bool,
     pub live_diarization_enabled: bool,
+    #[serde(default = "default_live_sessions_output_dir_value")]
+    pub live_sessions_output_dir: String,
 }
 
 fn default_live_webrtc_enabled() -> bool {
     true
+}
+
+fn default_live_sessions_output_dir_value() -> String {
+    default_live_sessions_dir().display().to_string()
 }
 
 impl Default for AppSettings {
@@ -117,11 +123,29 @@ impl Default for AppSettings {
             runtime_download_backend: "vulkan".to_string(),
             live_webrtc_enabled: default_live_webrtc_enabled(),
             live_diarization_enabled: true,
+            live_sessions_output_dir: default_live_sessions_output_dir_value(),
         }
     }
 }
 
-pub fn default_runtime_dir() -> PathBuf {
+pub fn app_root_dir() -> PathBuf {
+    if let Some(dirs) = BaseDirs::new() {
+        return dirs
+            .data_dir()
+            .join("OpenResearchTools")
+            .join("TranscribeOffline");
+    }
+
+    if let Ok(app_data) = std::env::var("APPDATA") {
+        return PathBuf::from(app_data)
+            .join("OpenResearchTools")
+            .join("TranscribeOffline");
+    }
+
+    PathBuf::from("TranscribeOffline")
+}
+
+pub fn legacy_shared_runtime_dir() -> PathBuf {
     if let Some(dirs) = BaseDirs::new() {
         return dirs.data_dir().join("OpenResearchTools").join("engine");
     }
@@ -133,6 +157,23 @@ pub fn default_runtime_dir() -> PathBuf {
     }
 
     PathBuf::from("engine")
+}
+
+pub fn default_runtime_dir() -> PathBuf {
+    app_root_dir().join("Engine")
+}
+
+pub fn default_live_sessions_dir() -> PathBuf {
+    app_root_dir().join("live-sessions")
+}
+
+pub fn resolve_live_sessions_output_dir(raw: &str, paths: &AppPaths) -> PathBuf {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        paths.live_sessions_dir.clone()
+    } else {
+        PathBuf::from(trimmed)
+    }
 }
 
 pub fn normalize_runtime_dir_alias(raw: &str) -> String {
@@ -178,12 +219,20 @@ pub fn normalize_runtime_dir_alias(raw: &str) -> String {
         }
     }
 
+    let legacy_shared = legacy_shared_runtime_dir().display().to_string();
+    if out.eq_ignore_ascii_case(&legacy_shared) {
+        return default_runtime_dir().display().to_string();
+    }
+
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_runtime_dir_alias;
+    use super::{
+        default_live_sessions_dir, default_runtime_dir, legacy_shared_runtime_dir,
+        normalize_runtime_dir_alias,
+    };
 
     #[test]
     fn normalizes_engine_runtime_suffix_windows() {
@@ -208,6 +257,41 @@ mod tests {
         assert_eq!(normalize_runtime_dir_alias("engine-vulkan"), "engine");
         assert_eq!(normalize_runtime_dir_alias("engine-vulcan"), "engine");
         assert_eq!(normalize_runtime_dir_alias("engine-cuda"), "engine");
+    }
+
+    #[test]
+    fn maps_legacy_shared_runtime_to_app_scoped_engine_dir() {
+        let got = normalize_runtime_dir_alias(&legacy_shared_runtime_dir().display().to_string());
+        assert_eq!(got, default_runtime_dir().display().to_string());
+    }
+
+    #[test]
+    fn default_paths_use_transcribeoffline_app_scope() {
+        let runtime_dir = default_runtime_dir();
+        assert_eq!(
+            runtime_dir.file_name().and_then(|value| value.to_str()),
+            Some("Engine")
+        );
+        assert_eq!(
+            runtime_dir
+                .parent()
+                .and_then(|value| value.file_name())
+                .and_then(|value| value.to_str()),
+            Some("TranscribeOffline")
+        );
+
+        let live_sessions_dir = default_live_sessions_dir();
+        assert_eq!(
+            live_sessions_dir
+                .parent()
+                .and_then(|value| value.file_name())
+                .and_then(|value| value.to_str()),
+            Some("TranscribeOffline")
+        );
+        assert_eq!(
+            live_sessions_dir.file_name().and_then(|value| value.to_str()),
+            Some("live-sessions")
+        );
     }
 }
 
@@ -335,17 +419,16 @@ pub fn default_diarization_models_dir(paths: &AppPaths) -> PathBuf {
 }
 
 pub fn app_paths() -> Result<AppPaths> {
-    let dirs = ProjectDirs::from("com", "OpenResearchTools", "TranscribeOffline")
-        .context("failed to resolve user-space app directories")?;
-    let config_dir = dirs.config_dir().to_path_buf();
-    let data_dir = dirs.data_dir().to_path_buf();
+    let app_root = app_root_dir();
+    let config_dir = app_root.clone();
+    let data_dir = app_root;
     let models_dir = default_models_root_dir();
     let whisper_models_dir = models_dir.join(WHISPER_TURBO_REPO_DIR_NAME);
     let whisper_large_v3_models_dir = models_dir.join(WHISPER_LARGE_V3_REPO_DIR_NAME);
     let live_models_dir = models_dir.join(LIVE_TRANSCRIPTION_REPO_DIR_NAME);
     let chat_models_dir = models_dir.join(CHAT_REPO_DIR_NAME);
     let diarization_models_dir = models_dir.join(DIARIZATION_REPO_DIR_NAME);
-    let live_sessions_dir = data_dir.join("live-sessions");
+    let live_sessions_dir = default_live_sessions_dir();
     Ok(AppPaths {
         settings_yaml: config_dir.join("settings.yaml"),
         model_links_yaml: config_dir.join("model-links.yaml"),
@@ -421,6 +504,40 @@ pub fn ensure_dirs(paths: &AppPaths) -> Result<()> {
 
 pub fn load_settings(paths: &AppPaths) -> Result<AppSettings> {
     if !paths.settings_yaml.exists() {
+        if let Some(legacy_dirs) =
+            ProjectDirs::from("com", "OpenResearchTools", "TranscribeOffline")
+        {
+            let legacy_settings = legacy_dirs.config_dir().join("settings.yaml");
+            if legacy_settings.exists() {
+                let legacy_raw = fs::read_to_string(&legacy_settings).with_context(|| {
+                    format!("failed to read legacy settings '{}'", legacy_settings.display())
+                })?;
+                fs::write(&paths.settings_yaml, legacy_raw).with_context(|| {
+                    format!(
+                        "failed to migrate settings into '{}'",
+                        paths.settings_yaml.display()
+                    )
+                })?;
+                let legacy_model_links = legacy_dirs.config_dir().join("model-links.yaml");
+                if legacy_model_links.exists() {
+                    let legacy_links_raw =
+                        fs::read_to_string(&legacy_model_links).with_context(|| {
+                            format!(
+                                "failed to read legacy model links '{}'",
+                                legacy_model_links.display()
+                            )
+                        })?;
+                    fs::write(&paths.model_links_yaml, legacy_links_raw).with_context(|| {
+                        format!(
+                            "failed to migrate model links into '{}'",
+                            paths.model_links_yaml.display()
+                        )
+                    })?;
+                }
+            }
+        }
+    }
+    if !paths.settings_yaml.exists() {
         let mut defaults = AppSettings::default();
         defaults.whisper_model = default_whisper_model_path(paths).display().to_string();
         defaults.live_transcription_model = default_live_transcription_model_path(paths)
@@ -428,6 +545,7 @@ pub fn load_settings(paths: &AppPaths) -> Result<AppSettings> {
             .to_string();
         defaults.diarization_models_dir =
             default_diarization_models_dir(paths).display().to_string();
+        defaults.live_sessions_output_dir = default_live_sessions_output_dir_value();
         save_settings(paths, &defaults)?;
         save_model_links(paths, &defaults.to_model_links())?;
         return Ok(defaults);
@@ -452,6 +570,7 @@ pub fn load_settings(paths: &AppPaths) -> Result<AppSettings> {
     let original_live_model = parsed.live_transcription_model.clone();
     let original_diarization_dir = parsed.diarization_models_dir.clone();
     let original_live_webrtc_enabled = parsed.live_webrtc_enabled;
+    let original_live_sessions_output_dir = parsed.live_sessions_output_dir.clone();
     parsed.runtime_dir = normalize_runtime_dir(parsed.runtime_dir);
     parsed.whisper_model = normalize_whisper_model_path(&parsed.whisper_model, paths);
     parsed.live_transcription_model = normalize_repo_managed_file_path(
@@ -479,11 +598,15 @@ pub fn load_settings(paths: &AppPaths) -> Result<AppSettings> {
         parsed.diarization_models_dir = default_diarization_models_dir(paths).display().to_string();
     }
     parsed.live_webrtc_enabled = true;
+    if parsed.live_sessions_output_dir.trim().is_empty() {
+        parsed.live_sessions_output_dir = default_live_sessions_output_dir_value();
+    }
     if parsed.runtime_dir != original_runtime_dir
         || parsed.whisper_model != original_whisper_model
         || parsed.live_transcription_model != original_live_model
         || parsed.diarization_models_dir != original_diarization_dir
         || parsed.live_webrtc_enabled != original_live_webrtc_enabled
+        || parsed.live_sessions_output_dir != original_live_sessions_output_dir
     {
         save_settings(paths, &parsed)?;
         save_model_links(paths, &parsed.to_model_links())?;
@@ -492,25 +615,7 @@ pub fn load_settings(paths: &AppPaths) -> Result<AppSettings> {
 }
 
 fn normalize_runtime_dir(raw: String) -> String {
-    let normalized = normalize_runtime_dir_alias(&raw);
-    if is_disallowed_runtime_path(&normalized) {
-        return String::new();
-    }
-
-    normalized
-}
-
-fn is_disallowed_runtime_path(raw: &str) -> bool {
-    let path = Path::new(raw);
-    if raw.trim().is_empty() {
-        return false;
-    }
-
-    path.components().any(|c| {
-        c.as_os_str()
-            .to_string_lossy()
-            .eq_ignore_ascii_case("transcribeoffline")
-    })
+    normalize_runtime_dir_alias(&raw)
 }
 
 pub fn save_settings(paths: &AppPaths, settings: &AppSettings) -> Result<()> {

@@ -1,6 +1,6 @@
 use crate::audio_assembler::{
-    assemble_turns_with_words, turns_to_markdown, AssembleOptions, SpeakerSpan, SpeakerTurn,
-    TranscriptPiece,
+    assemble_live_final_turns_with_words, assemble_live_turns_with_words, turns_to_markdown,
+    AssembleOptions, SpeakerSpan, SpeakerTurn, TranscriptPiece,
 };
 use crate::bridge::{
     AudioSessionEvent, AUDIO_EVENT_DIARIZATION_SPAN_COMMIT, AUDIO_EVENT_FLAG_PREVIEW,
@@ -103,7 +103,7 @@ impl DiarizedTranscriptOrchestrator {
 
         let assembly_spans = self.assembly_spans();
         if changed && !assembly_spans.is_empty() && !self.pieces.is_empty() {
-            self.turns = assemble_turns_with_words(
+            self.turns = assemble_live_turns_with_words(
                 &assembly_spans,
                 &self.pieces,
                 &self.words,
@@ -120,6 +120,26 @@ impl DiarizedTranscriptOrchestrator {
             markdown: self.markdown.clone(),
             latest_transcription_json: self.latest_transcription_json.clone(),
         }
+    }
+
+    pub fn final_snapshot(&self) -> OrchestratorSnapshot {
+        let mut snapshot = self.snapshot();
+        let final_spans = self.active_spans();
+        if final_spans.is_empty() || self.pieces.is_empty() {
+            return snapshot;
+        }
+
+        let turns = assemble_live_final_turns_with_words(
+            final_spans,
+            &self.pieces,
+            &self.words,
+            &self.options,
+        );
+        let markdown = turns_to_markdown(&turns, self.sample_rate_hz);
+        if !markdown.trim().is_empty() {
+            snapshot.markdown = markdown;
+        }
+        snapshot
     }
 
     fn active_spans(&self) -> &[SpeakerSpan] {
@@ -244,5 +264,54 @@ mod tests {
         assert!(markdown.contains("### UNASSIGNED"));
         assert!(markdown.contains("tail keeps moving forward"));
         assert!(!markdown.contains("### SPEAKER_01 [00:01.000 - 00:02.000]"));
+    }
+
+    #[test]
+    fn final_snapshot_assigns_remaining_tail_to_last_speaker() {
+        let mut orchestrator = DiarizedTranscriptOrchestrator::new(16_000);
+
+        orchestrator.ingest_event(&make_event(
+            AUDIO_EVENT_DIARIZATION_SPAN_COMMIT,
+            AUDIO_EVENT_FLAG_PREVIEW | AUDIO_EVENT_FLAG_SNAPSHOT_START,
+            0,
+            16_000,
+            "SPEAKER_00",
+        ));
+        orchestrator.ingest_event(&make_event(
+            AUDIO_EVENT_DIARIZATION_SPAN_COMMIT,
+            AUDIO_EVENT_FLAG_PREVIEW | AUDIO_EVENT_FLAG_SNAPSHOT_END,
+            16_000,
+            32_000,
+            "SPEAKER_01",
+        ));
+
+        orchestrator.ingest_event(&make_event(
+            AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT,
+            0,
+            0,
+            16_000,
+            "don't watch porn at",
+        ));
+        orchestrator.ingest_event(&make_event(
+            AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT,
+            0,
+            16_000,
+            32_000,
+            "all.",
+        ));
+        orchestrator.ingest_event(&make_event(
+            AUDIO_EVENT_TRANSCRIPTION_PIECE_COMMIT,
+            0,
+            32_000,
+            48_000,
+            "Probably more varied porn",
+        ));
+
+        let markdown = orchestrator.final_snapshot().markdown;
+        assert!(markdown.contains("### SPEAKER_00"));
+        assert!(markdown.contains("don't watch porn at all."));
+        assert!(markdown.contains("### SPEAKER_01"));
+        assert!(markdown.contains("Probably more varied porn"));
+        assert!(!markdown.contains("### UNASSIGNED"));
     }
 }

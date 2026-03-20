@@ -95,6 +95,7 @@ struct WhisperModelSpec {
     label: &'static str,
     file_name: &'static str,
     url: &'static str,
+    size_bytes: u64,
     repo_label: &'static str,
     repo_url: &'static str,
 }
@@ -104,6 +105,7 @@ struct LiveModelSpec {
     label: &'static str,
     file_name: &'static str,
     url: &'static str,
+    size_bytes: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -111,6 +113,7 @@ struct ChatModelSpec {
     label: &'static str,
     file_name: &'static str,
     url: &'static str,
+    size_bytes: u64,
 }
 
 fn clamp_font_px(size_px: f32) -> f32 {
@@ -147,6 +150,23 @@ fn parse_download_fraction(status: &str) -> Option<f32> {
         return None;
     }
     Some((done / total).clamp(0.0, 1.0) as f32)
+}
+
+fn human_model_size(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.2} MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.2} KiB", bytes / KIB)
+    } else {
+        format!("{:.0} B", bytes)
+    }
 }
 
 fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
@@ -541,16 +561,18 @@ fn run_unsigned_runtime_unblock_script(_paths: &AppPaths, runtime_dir: &Path) ->
 
 const WHISPER_MODELS: &[WhisperModelSpec] = &[
     WhisperModelSpec {
-        label: "large-v3-turbo (recommended)",
+        label: "Whisper Large v3 Turbo (Recommended)",
         file_name: "whisper-large-v3-turbo-GGML.bin",
         url: "https://huggingface.co/openresearchtools/whisper-large-v3-turbo-GGML/resolve/main/whisper-large-v3-turbo-GGML.bin?download=true",
+        size_bytes: 1_624_555_275,
         repo_label: "openresearchtools/whisper-large-v3-turbo-GGML",
         repo_url: "https://huggingface.co/openresearchtools/whisper-large-v3-turbo-GGML",
     },
     WhisperModelSpec {
-        label: "large-v3",
+        label: "Whisper Large v3",
         file_name: "whisper-large-v3-GGML.bin",
         url: "https://huggingface.co/openresearchtools/whisper-large-v3-GGML/resolve/main/whisper-large-v3-GGML.bin?download=true",
+        size_bytes: 3_095_033_483,
         repo_label: "openresearchtools/whisper-large-v3-GGML",
         repo_url: "https://huggingface.co/openresearchtools/whisper-large-v3-GGML",
     },
@@ -558,37 +580,43 @@ const WHISPER_MODELS: &[WhisperModelSpec] = &[
 
 const LIVE_TRANSCRIPTION_MODELS: &[LiveModelSpec] = &[
     LiveModelSpec {
-        label: "q4_0 (recommended)",
+        label: "Voxtral Mini 4B Realtime Q4_0 (Recommended)",
         file_name: "voxtral-mini-4b-realtime-q4_0.gguf",
         url: "https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602/resolve/main/voxtral-mini-4b-realtime-q4_0.gguf?download=true",
+        size_bytes: 2_503_688_320,
     },
     LiveModelSpec {
-        label: "f16",
+        label: "Voxtral Mini 4B Realtime F16",
         file_name: "voxtral-mini-4b-realtime-f16.gguf",
         url: "https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602/resolve/main/voxtral-mini-4b-realtime-f16.gguf?download=true",
+        size_bytes: 8_862_916_736,
     },
     LiveModelSpec {
-        label: "q8_0",
+        label: "Voxtral Mini 4B Realtime Q8_0",
         file_name: "voxtral-mini-4b-realtime-q8_0.gguf",
         url: "https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602/resolve/main/voxtral-mini-4b-realtime-q8_0.gguf?download=true",
+        size_bytes: 4_715_593_856,
     },
 ];
 
 const CHAT_MODELS: &[ChatModelSpec] = &[
     ChatModelSpec {
-        label: "Q4_K_M (recommended)",
+        label: "Qwen 3.5 9B Q4_K_M (Recommended)",
         file_name: "Qwen3.5-9B-Q4_K_M.gguf",
         url: "https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf?download=true",
+        size_bytes: 5_629_109_056,
     },
     ChatModelSpec {
-        label: "Q8_0",
+        label: "Qwen 3.5 9B Q8_0",
         file_name: "Qwen3.5-9B-Q8_0.gguf",
         url: "https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q8_0.gguf?download=true",
+        size_bytes: 9_527_501_632,
     },
 ];
 
 const DIARIZATION_MODEL_URL: &str =
     "https://huggingface.co/openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf/resolve/main/diar_streaming_sortformer_4spk-v2.1.gguf?download=true";
+const DIARIZATION_MODEL_SIZE_BYTES: u64 = 471_107_712;
 
 #[derive(Debug, Clone)]
 struct TranscriptionResult {
@@ -2389,11 +2417,6 @@ impl UiApp {
                             transcript_path.clone(),
                             false,
                         );
-                        ensure_output_entry(
-                            &mut state.output_entries,
-                            edited_file_path(&transcript_path),
-                            false,
-                        );
                         if !state
                             .media_entries
                             .iter()
@@ -2670,6 +2693,10 @@ impl UiApp {
                 .get(self.whisper_models)
                 .copied()
                 .unwrap_or(WHISPER_MODELS[0]);
+            ui.label(format!(
+                "Download size: {}",
+                human_model_size(selected_whisper_spec.size_bytes)
+            ));
             model_repo_license_note(
                 ui,
                 selected_whisper_spec.repo_label,
@@ -2679,7 +2706,7 @@ impl UiApp {
         });
 
         engine_panel_frame().show(ui, |ui| {
-            ui.heading("Realtime Voxtral Model (Live Tab)");
+            ui.heading("Live Model (Voxtral Realtime)");
             ui.horizontal(|ui| {
                 ui.label("Realtime model:");
                 egui::ComboBox::from_id_salt("live_model_runtime_settings")
@@ -2731,6 +2758,14 @@ impl UiApp {
             } else {
                 ui.label("Optional for the Live tab. Download a Voxtral model to enable microphone transcription.");
             }
+            let selected_live_spec = LIVE_TRANSCRIPTION_MODELS
+                .get(self.live_models)
+                .copied()
+                .unwrap_or(LIVE_TRANSCRIPTION_MODELS[0]);
+            ui.label(format!(
+                "Download size: {}",
+                human_model_size(selected_live_spec.size_bytes)
+            ));
             model_repo_license_note(
                 ui,
                 "openresearchtools/Voxtral-Mini-4B-Realtime-2602",
@@ -2740,7 +2775,7 @@ impl UiApp {
         });
 
         engine_panel_frame().show(ui, |ui| {
-            ui.heading("Diarization Model (Sortformer GGUF) *");
+            ui.heading("Diarization Model (Sortformer) *");
             let missing =
                 missing_diarization_files(Path::new(self.settings.diarization_models_dir.trim()));
             ui.horizontal(|ui| {
@@ -2764,6 +2799,10 @@ impl UiApp {
                     format!("Missing required file: {}", missing.join(", ")),
                 );
             }
+            ui.label(format!(
+                "Download size: {}",
+                human_model_size(DIARIZATION_MODEL_SIZE_BYTES)
+            ));
             model_repo_license_note(
                 ui,
                 "openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf",
@@ -2840,6 +2879,10 @@ impl UiApp {
                     "Download installs the selected GGUF into the shared app data model store.",
                 );
             }
+            ui.label(format!(
+                "Download size: {}",
+                human_model_size(selected_spec.size_bytes)
+            ));
 
             ui.separator();
             ui.horizontal(|ui| {
@@ -2969,6 +3012,52 @@ impl UiApp {
                 self.push_status("File dialog backend crashed; app stayed open.");
                 None
             }
+        }
+    }
+
+    fn resolved_live_sessions_output_dir(&self) -> PathBuf {
+        settings::resolve_live_sessions_output_dir(
+            &self.settings.live_sessions_output_dir,
+            &self.paths,
+        )
+    }
+
+    fn do_pick_live_sessions_output_dir(&mut self) {
+        let current_dir = self.resolved_live_sessions_output_dir();
+        let dialog_dir = if current_dir.is_dir() {
+            current_dir.clone()
+        } else {
+            current_dir
+                .parent()
+                .map(|path| path.to_path_buf())
+                .unwrap_or_else(|| self.paths.data_dir.clone())
+        };
+
+        if let Some(path) = self.safe_dialog_call("Choose folder for live sessions", || {
+            FileDialog::new()
+                .set_title("Choose folder for live recordings and transcripts")
+                .set_directory(dialog_dir)
+                .pick_folder()
+        }) {
+            self.settings.live_sessions_output_dir = path.display().to_string();
+            self.queue_save();
+        }
+    }
+
+    fn open_live_sessions_output_dir(&mut self) {
+        let path = self.resolved_live_sessions_output_dir();
+        if let Err(err) = fs::create_dir_all(&path) {
+            self.push_status(&format!(
+                "Failed to create live sessions folder '{}': {err}",
+                path.display()
+            ));
+            return;
+        }
+        if let Err(err) = open::that(&path) {
+            self.push_status(&format!(
+                "Failed to open live sessions folder '{}': {err}",
+                path.display()
+            ));
         }
     }
 
@@ -3596,7 +3685,6 @@ impl UiApp {
         let live_running = self.live_capture.is_some();
         engine_panel_frame().show(ui, |ui| {
             ui.heading("Live Transcription");
-            ui.label("Capture microphone audio, save the streamed PCM as WAV, and transcribe it in-process with the engine v1.9 session API.");
             ui.separator();
 
             ui.horizontal(|ui| {
@@ -3629,56 +3717,20 @@ impl UiApp {
                 }
             }
 
-            ui.horizontal(|ui| {
-                ui.label("Realtime model:");
-                egui::ComboBox::from_id_salt("live_tab_model_combo")
-                    .selected_text(
-                        LIVE_TRANSCRIPTION_MODELS
-                            .get(self.live_models)
-                            .map(|spec| live_model_combo_label(&self.paths, spec))
-                            .unwrap_or_else(|| "Select model".to_string()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (idx, spec) in LIVE_TRANSCRIPTION_MODELS.iter().enumerate() {
-                            ui.selectable_value(
-                                &mut self.live_models,
-                                idx,
-                                live_model_combo_label(&self.paths, spec),
-                            );
-                        }
-                    });
-                if secondary_button(ui, "Download model").clicked() && !live_running {
-                    self.do_download_live_model();
-                }
-            });
-
-            if let Some(spec) = LIVE_TRANSCRIPTION_MODELS.get(self.live_models) {
-                let selected_path = live_model_dest_path(&self.paths, spec.file_name)
-                    .display()
-                    .to_string();
-                if self.settings.live_transcription_model != selected_path {
-                    self.settings.live_transcription_model = selected_path;
-                    self.queue_save();
-                }
-            }
-
             ui.horizontal_wrapped(|ui| {
-                ui.label("WebRTC cleanup / normalization stays enabled for live capture.");
                 if ui
                     .checkbox(
                         &mut self.settings.live_diarization_enabled,
-                        "Enable live diarization (Sortformer)",
+                        "Enable live diarization",
                     )
                     .changed()
                 {
                     self.queue_save();
                 }
-                if ui.button("Open live sessions folder").clicked() {
-                    let _ = open::that(self.paths.live_sessions_dir.clone());
+                if ui.button("Open save folder").clicked() {
+                    self.open_live_sessions_output_dir();
                 }
             });
-
-            ui.label("Live capture always uses the backend WebRTC cleanup path before the mono 16 kHz realtime runtime.");
 
             ui.horizontal(|ui| {
                 if !live_running {
@@ -3695,6 +3747,8 @@ impl UiApp {
                 });
             });
 
+            let live_output_dir = self.resolved_live_sessions_output_dir();
+            ui.label(format!("Save folder: {}", live_output_dir.display()));
             if let Some(path) = &self.live_recording_path {
                 ui.label(format!("Recording WAV: {}", path.display()));
             }
@@ -5370,6 +5424,26 @@ impl UiApp {
                         ui.text_edit_singleline(&mut self.settings.whisper_word_time_offset_sec);
                     });
                     ui.label("Word timing offset shifts whisper timestamps so speaker turns align better in diarized output. Keep 0.73 unless you need to retune.");
+                });
+
+                let live_output_dir = self.resolved_live_sessions_output_dir();
+                engine_panel_frame().show(ui, |ui| {
+                    ui.heading("Live Sessions");
+                    ui.label("Choose where live recordings and transcripts are saved.");
+                    ui.label(format!("Current folder: {}", live_output_dir.display()));
+                    ui.horizontal(|ui| {
+                        if secondary_button(ui, "Choose folder").clicked() {
+                            self.do_pick_live_sessions_output_dir();
+                        }
+                        if ui.button("Open folder").clicked() {
+                            self.open_live_sessions_output_dir();
+                        }
+                        if ui.button("Reset to default").clicked() {
+                            self.settings.live_sessions_output_dir =
+                                settings::default_live_sessions_dir().display().to_string();
+                            self.queue_save();
+                        }
+                    });
                 });
 
                 ui.separator();

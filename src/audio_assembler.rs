@@ -127,6 +127,22 @@ fn first_sentence_boundary(text: &str) -> Option<usize> {
     None
 }
 
+fn last_sentence_boundary(text: &str) -> Option<usize> {
+    let trimmed = text.trim();
+    let offset = text.find(trimmed)?;
+    let mut found = None;
+    for (idx, ch) in trimmed.char_indices() {
+        if matches!(ch, '.' | ';' | '?' | '!') {
+            let split = offset + idx + ch.len_utf8();
+            let right = text[split..].trim();
+            if !right.is_empty() {
+                found = Some(split);
+            }
+        }
+    }
+    found
+}
+
 fn trim_leading_token(text: &str) -> &str {
     text.trim_start_matches(char::is_whitespace)
 }
@@ -939,8 +955,185 @@ fn merge_adjacent_turns(turns: &[SpeakerTurn]) -> Vec<SpeakerTurn> {
     merged
 }
 
+fn split_turn_at(turn: &SpeakerTurn, split_index: usize) -> Option<(SpeakerTurn, SpeakerTurn)> {
+    if split_index == 0 || split_index >= turn.text.len() {
+        return None;
+    }
+
+    let left_text = turn.text[..split_index].trim_end().to_string();
+    let right_text = turn.text[split_index..].trim_start().to_string();
+    if left_text.is_empty() || right_text.is_empty() {
+        return None;
+    }
+
+    let total_len = left_text.len() + right_text.len();
+    if total_len == 0 {
+        return None;
+    }
+    let duration = turn.end_sample.saturating_sub(turn.start_sample);
+    let left_duration = duration.saturating_mul(left_text.len() as u64) / total_len as u64;
+    let mid = turn.start_sample.saturating_add(left_duration);
+
+    Some((
+        SpeakerTurn {
+            speaker: turn.speaker.clone(),
+            start_sample: turn.start_sample,
+            end_sample: mid.max(turn.start_sample),
+            text: left_text,
+        },
+        SpeakerTurn {
+            speaker: turn.speaker.clone(),
+            start_sample: mid.max(turn.start_sample),
+            end_sample: turn.end_sample.max(mid),
+            text: right_text,
+        },
+    ))
+}
+
 fn speaker_turn_word_count(turn: &SpeakerTurn) -> usize {
     turn.text.split_whitespace().count()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LiveBoundaryOwner {
+    Left,
+    Right,
+}
+
+fn starts_with_hard_sentence_start(text: &str) -> bool {
+    starts_with_sentence_start(text) && first_token(text) != "I"
+}
+
+fn larger_live_boundary_owner(left_fragment: &SpeakerTurn, right_fragment: &SpeakerTurn) -> LiveBoundaryOwner {
+    let left_words = speaker_turn_word_count(left_fragment);
+    let right_words = speaker_turn_word_count(right_fragment);
+    if left_words > right_words {
+        LiveBoundaryOwner::Left
+    } else if right_words > left_words {
+        LiveBoundaryOwner::Right
+    } else if left_fragment.text.len() >= right_fragment.text.len() {
+        LiveBoundaryOwner::Left
+    } else {
+        LiveBoundaryOwner::Right
+    }
+}
+
+fn can_move_whole_finished_fragment(turn: &SpeakerTurn) -> bool {
+    const MAX_WHOLE_TURN_MOVE_WORDS: usize = 5;
+    const MAX_WHOLE_TURN_MOVE_CHARS: usize = 40;
+
+    speaker_turn_word_count(turn) <= MAX_WHOLE_TURN_MOVE_WORDS
+        || turn.text.trim().len() <= MAX_WHOLE_TURN_MOVE_CHARS
+}
+
+fn rebuild_live_boundary(
+    turns: &[SpeakerTurn],
+    boundary_index: usize,
+    replacement: Vec<SpeakerTurn>,
+) -> Vec<SpeakerTurn> {
+    let mut rebuilt = turns[..boundary_index].to_vec();
+    rebuilt.extend(merge_adjacent_turns(&replacement));
+    rebuilt
+}
+
+fn repair_live_last_finished_boundary(turns: &mut Vec<SpeakerTurn>) {
+    if turns.len() < 2 {
+        return;
+    }
+
+    let boundary_index = turns.len() - 2;
+    let left = turns[boundary_index].clone();
+    let right = turns[boundary_index + 1].clone();
+    if left.speaker == right.speaker {
+        return;
+    }
+
+    let left_parts = last_sentence_boundary(&left.text).and_then(|split| split_turn_at(&left, split));
+    let (left_head, left_fragment) = match left_parts {
+        Some((head, tail)) if !ends_sentence(&tail.text) => (Some(head), tail),
+        _ => (None, left.clone()),
+    };
+
+    let right_parts =
+        first_sentence_boundary(&right.text).and_then(|split| split_turn_at(&right, split));
+    let (right_fragment, right_rest) = match right_parts {
+        Some((head, tail)) => (head, Some(tail)),
+        None => (right.clone(), None),
+    };
+
+    if left_fragment.text.trim().is_empty() || right_fragment.text.trim().is_empty() {
+        return;
+    }
+
+    let right_is_continuation = next_piece_looks_like_continuation(&right.text);
+    let right_is_hard_sentence_start = starts_with_hard_sentence_start(&right.text);
+
+    if !ends_sentence(&left.text) && right_is_continuation && right_rest.is_some() {
+        let mut replacement = Vec::new();
+        if let Some(head) = left_head {
+            replacement.push(head);
+        }
+        replacement.push(left_fragment);
+        let mut moved = right_fragment;
+        moved.speaker = left.speaker.clone();
+        replacement.push(moved);
+        if let Some(rest) = right_rest.clone() {
+            replacement.push(rest);
+        }
+        *turns = rebuild_live_boundary(turns, boundary_index, replacement);
+        return;
+    }
+
+    if right_is_hard_sentence_start {
+        return;
+    }
+
+    let move_right_back = if right_is_continuation {
+        right_rest.is_some()
+            || (ends_sentence(&right_fragment.text) && can_move_whole_finished_fragment(&right_fragment))
+            || (matches!(
+                larger_live_boundary_owner(&left_fragment, &right_fragment),
+                LiveBoundaryOwner::Left
+            ) && can_move_whole_finished_fragment(&right_fragment))
+    } else {
+        false
+    };
+
+    if move_right_back {
+        let mut replacement = Vec::new();
+        if let Some(head) = left_head {
+            replacement.push(head);
+        }
+        replacement.push(left_fragment);
+        let mut moved = right_fragment;
+        moved.speaker = left.speaker.clone();
+        replacement.push(moved);
+        if let Some(rest) = right_rest {
+            replacement.push(rest);
+        }
+        *turns = rebuild_live_boundary(turns, boundary_index, replacement);
+        return;
+    }
+
+    let move_left_forward = matches!(
+        larger_live_boundary_owner(&left_fragment, &right_fragment),
+        LiveBoundaryOwner::Right
+    ) && (left_head.is_some() || can_move_whole_finished_fragment(&left_fragment));
+
+    if move_left_forward {
+        let mut replacement = Vec::new();
+        if let Some(head) = left_head {
+            replacement.push(head);
+        }
+        let mut moved = left_fragment;
+        moved.speaker = right.speaker.clone();
+        replacement.push(moved);
+        replacement.push(right_fragment);
+        if let Some(rest) = right_rest {
+            replacement.push(rest);
+        }
+        *turns = rebuild_live_boundary(turns, boundary_index, replacement);
+    }
 }
 
 fn absorb_short_turn_islands(turns: &mut [SpeakerTurn]) {
@@ -1046,6 +1239,70 @@ pub fn assemble_turns_with_words(
         }
         turns.push(tail);
     }
+    absorb_short_turn_islands(&mut turns);
+    merge_adjacent_turns(&turns)
+}
+
+pub fn assemble_live_turns_with_words(
+    spans: &[SpeakerSpan],
+    pieces: &[TranscriptPiece],
+    words: &[TranscriptPiece],
+    options: &AssembleOptions,
+) -> Vec<SpeakerTurn> {
+    let mut assigned = assign_pieces(spans, pieces, words, options);
+    repair_unassigned_boundaries_with_words(&mut assigned, words);
+    absorb_short_speaker_islands(&mut assigned);
+
+    let stable_until = spans.iter().map(|span| span.end_sample).max().unwrap_or(0);
+    let split_index = assigned
+        .iter()
+        .position(|piece| piece.start_sample >= stable_until)
+        .unwrap_or(assigned.len());
+    let (stable_assigned, tail_assigned) = assigned.split_at(split_index);
+
+    let mut turns = merge_turns(stable_assigned);
+    repair_live_last_finished_boundary(&mut turns);
+    if let Some(mut tail) = collapse_unassigned_tail_turn(tail_assigned) {
+        if let Some(previous_turn) = turns.last() {
+            if tail_should_follow_previous_speaker(previous_turn, &tail) {
+                tail.speaker = previous_turn.speaker.clone();
+            }
+        }
+        turns.push(tail);
+        repair_live_last_finished_boundary(&mut turns);
+    }
+    absorb_short_turn_islands(&mut turns);
+    merge_adjacent_turns(&turns)
+}
+
+pub fn assemble_live_final_turns_with_words(
+    spans: &[SpeakerSpan],
+    pieces: &[TranscriptPiece],
+    words: &[TranscriptPiece],
+    options: &AssembleOptions,
+) -> Vec<SpeakerTurn> {
+    let mut assigned = assign_pieces(spans, pieces, words, options);
+    repair_unassigned_boundaries_with_words(&mut assigned, words);
+    absorb_short_speaker_islands(&mut assigned);
+
+    let stable_until = spans.iter().map(|span| span.end_sample).max().unwrap_or(0);
+    let split_index = assigned
+        .iter()
+        .position(|piece| piece.start_sample >= stable_until)
+        .unwrap_or(assigned.len());
+    let (stable_assigned, tail_assigned) = assigned.split_at(split_index);
+
+    let mut turns = merge_turns(stable_assigned);
+    if let Some(mut tail) = collapse_unassigned_tail_turn(tail_assigned) {
+        if let Some(previous_turn) = turns.last() {
+            tail.speaker = previous_turn.speaker.clone();
+        } else if let Some(last_span) = spans.last() {
+            tail.speaker = last_span.speaker.clone();
+        }
+        turns.push(tail);
+    }
+    turns = merge_adjacent_turns(&turns);
+    repair_live_last_finished_boundary(&mut turns);
     absorb_short_turn_islands(&mut turns);
     merge_adjacent_turns(&turns)
 }
@@ -1268,4 +1525,238 @@ mod tests {
         assert_eq!(turns[0].speaker, "SPEAKER_00");
         assert!(turns[0].text.contains("Today I agree."));
     }
+
+    #[test]
+    fn live_repairs_only_last_finished_boundary_before_unassigned_tail() {
+        let spans = vec![
+            SpeakerSpan {
+                speaker: "SPEAKER_00".to_string(),
+                start_sample: 0,
+                end_sample: 16_000,
+            },
+            SpeakerSpan {
+                speaker: "SPEAKER_01".to_string(),
+                start_sample: 16_000,
+                end_sample: 32_000,
+            },
+        ];
+        let pieces = vec![
+            TranscriptPiece {
+                start_sample: 0,
+                end_sample: 16_000,
+                text: "don't watch porn at".to_string(),
+            },
+            TranscriptPiece {
+                start_sample: 16_000,
+                end_sample: 32_000,
+                text: "all.".to_string(),
+            },
+            TranscriptPiece {
+                start_sample: 32_000,
+                end_sample: 48_000,
+                text: "Probably more varied porn".to_string(),
+            },
+        ];
+
+        let turns =
+            assemble_live_turns_with_words(&spans, &pieces, &[], &AssembleOptions::default());
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].speaker, "SPEAKER_00");
+        assert_eq!(turns[0].text, "don't watch porn at all.");
+        assert_eq!(turns[1].speaker, "UNASSIGNED");
+        assert_eq!(turns[1].text, "Probably more varied porn");
+    }
+
+    #[test]
+    fn live_keeps_short_sentence_tail_with_previous_speaker() {
+        let spans = vec![SpeakerSpan {
+            speaker: "SPEAKER_00".to_string(),
+            start_sample: 0,
+            end_sample: 32_000,
+        }];
+        let pieces = vec![
+            TranscriptPiece {
+                start_sample: 0,
+                end_sample: 30_000,
+                text: "they sort of say one thing and then contradict themselves within two"
+                    .to_string(),
+            },
+            TranscriptPiece {
+                start_sample: 32_000,
+                end_sample: 34_000,
+                text: "seconds.".to_string(),
+            },
+        ];
+
+        let turns =
+            assemble_live_turns_with_words(&spans, &pieces, &[], &AssembleOptions::default());
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].speaker, "SPEAKER_00");
+        assert!(turns[0].text.ends_with("within two seconds."));
+    }
+
+    #[test]
+    fn live_moves_short_previous_fragment_forward_when_next_finished_turn_is_larger() {
+        let mut turns = vec![
+            SpeakerTurn {
+                speaker: "SPEAKER_00".to_string(),
+                start_sample: 0,
+                end_sample: 8_000,
+                text: "you".to_string(),
+            },
+            SpeakerTurn {
+                speaker: "SPEAKER_01".to_string(),
+                start_sample: 8_000,
+                end_sample: 40_000,
+                text: "guys in the same part of the country".to_string(),
+            },
+        ];
+
+        repair_live_last_finished_boundary(&mut turns);
+        let turns = merge_adjacent_turns(&turns);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].speaker, "SPEAKER_01");
+        assert_eq!(turns[0].text, "you guys in the same part of the country");
+    }
+
+    #[test]
+    fn live_keeps_uppercase_sentence_start_on_current_speaker() {
+        let mut turns = vec![
+            SpeakerTurn {
+                speaker: "SPEAKER_00".to_string(),
+                start_sample: 0,
+                end_sample: 20_000,
+                text: "it should be more conversations about sex".to_string(),
+            },
+            SpeakerTurn {
+                speaker: "SPEAKER_01".to_string(),
+                start_sample: 20_000,
+                end_sample: 40_000,
+                text: "But that's a much bigger issue.".to_string(),
+            },
+        ];
+
+        repair_live_last_finished_boundary(&mut turns);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].speaker, "SPEAKER_00");
+        assert_eq!(turns[0].text, "it should be more conversations about sex");
+        assert_eq!(turns[1].speaker, "SPEAKER_01");
+        assert_eq!(turns[1].text, "But that's a much bigger issue.");
+    }
+
+    #[test]
+    fn live_final_assigns_tail_to_last_speaker_and_finishes_boundary_repair() {
+        let spans = vec![
+            SpeakerSpan {
+                speaker: "SPEAKER_00".to_string(),
+                start_sample: 0,
+                end_sample: 16_000,
+            },
+            SpeakerSpan {
+                speaker: "SPEAKER_01".to_string(),
+                start_sample: 16_000,
+                end_sample: 32_000,
+            },
+        ];
+        let pieces = vec![
+            TranscriptPiece {
+                start_sample: 0,
+                end_sample: 16_000,
+                text: "don't watch porn at".to_string(),
+            },
+            TranscriptPiece {
+                start_sample: 16_000,
+                end_sample: 32_000,
+                text: "all.".to_string(),
+            },
+            TranscriptPiece {
+                start_sample: 32_000,
+                end_sample: 48_000,
+                text: "Probably more varied porn".to_string(),
+            },
+        ];
+
+        let turns = assemble_live_final_turns_with_words(
+            &spans,
+            &pieces,
+            &[],
+            &AssembleOptions::default(),
+        );
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].speaker, "SPEAKER_00");
+        assert_eq!(turns[0].text, "don't watch porn at all.");
+        assert_eq!(turns[1].speaker, "SPEAKER_01");
+        assert_eq!(turns[1].text, "Probably more varied porn");
+    }
+
+    #[test]
+    fn live_pulls_clear_continuation_prefix_back_from_finished_right_turn() {
+        let spans = vec![
+            SpeakerSpan {
+                speaker: "SPEAKER_00".to_string(),
+                start_sample: 0,
+                end_sample: 16_000,
+            },
+            SpeakerSpan {
+                speaker: "SPEAKER_01".to_string(),
+                start_sample: 16_000,
+                end_sample: 32_000,
+            },
+        ];
+        let pieces = vec![
+            TranscriptPiece {
+                start_sample: 0,
+                end_sample: 16_000,
+                text: "Stop spending so".to_string(),
+            },
+            TranscriptPiece {
+                start_sample: 16_000,
+                end_sample: 32_000,
+                text: "much money on me. I clearly want you to be able".to_string(),
+            },
+            TranscriptPiece {
+                start_sample: 32_000,
+                end_sample: 48_000,
+                text: "to pay your bills".to_string(),
+            },
+        ];
+
+        let turns =
+            assemble_live_turns_with_words(&spans, &pieces, &[], &AssembleOptions::default());
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[0].speaker, "SPEAKER_00");
+        assert_eq!(turns[0].text, "Stop spending so much money on me.");
+        assert_eq!(turns[1].speaker, "SPEAKER_01");
+        assert_eq!(turns[1].text, "I clearly want you to be able");
+        assert_eq!(turns[2].speaker, "UNASSIGNED");
+        assert_eq!(turns[2].text, "to pay your bills");
+    }
+
+    #[test]
+    fn live_pulls_short_finished_continuation_sentence_back() {
+        let mut turns = vec![
+            SpeakerTurn {
+                speaker: "SPEAKER_01".to_string(),
+                start_sample: 0,
+                end_sample: 20_000,
+                text: "I would never want to put them in a difficult or vulnerable situation. But I can't be".to_string(),
+            },
+            SpeakerTurn {
+                speaker: "SPEAKER_02".to_string(),
+                start_sample: 20_000,
+                end_sample: 24_000,
+                text: "responsible.".to_string(),
+            },
+        ];
+
+        repair_live_last_finished_boundary(&mut turns);
+        let turns = merge_adjacent_turns(&turns);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].speaker, "SPEAKER_01");
+        assert_eq!(
+            turns[0].text,
+            "I would never want to put them in a difficult or vulnerable situation. But I can't be responsible."
+        );
+    }
+
 }

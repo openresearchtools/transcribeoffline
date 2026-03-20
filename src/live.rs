@@ -95,6 +95,16 @@ pub(crate) fn start_live_capture(
     let runtime_dir = PathBuf::from(settings.runtime_dir.trim());
     let bridge_api = BridgeApi::load(&runtime_dir)?;
     let backend_name = resolve_runtime_backend_name(&bridge_api, settings)?;
+    let output_dir = crate::settings::resolve_live_sessions_output_dir(
+        &settings.live_sessions_output_dir,
+        paths,
+    );
+    fs::create_dir_all(&output_dir).map_err(|err| {
+        anyhow!(
+            "failed to create live sessions output directory '{}': {err}",
+            output_dir.display()
+        )
+    })?;
 
     let live_model_path = PathBuf::from(settings.live_transcription_model.trim());
     if !live_model_path.exists() {
@@ -116,12 +126,8 @@ pub(crate) fn start_live_capture(
         .unwrap_or_default()
         .as_micros() as u64;
     let session_name = format!("live-session-{session_id}");
-    let recording_path = paths
-        .live_sessions_dir
-        .join(format!("{session_name}.clean.wav"));
-    let transcript_path = paths
-        .live_sessions_dir
-        .join(if settings.live_diarization_enabled {
+    let recording_path = output_dir.join(format!("{session_name}.clean.wav"));
+    let transcript_path = output_dir.join(if settings.live_diarization_enabled {
             format!("{session_name}.transcript.md")
         } else {
             format!("{session_name}.transcript.txt")
@@ -139,7 +145,7 @@ pub(crate) fn start_live_capture(
     let worker_recording_path = recording_path.clone();
     let worker_transcript_path = transcript_path.clone();
     let worker_input_label = input_label.clone();
-    let worker_output_dir = paths.live_sessions_dir.clone();
+    let worker_output_dir = output_dir.clone();
     let worker_session_name = session_name.clone();
     let worker_capture_device_name = if settings.live_input_device.trim().is_empty() {
         None
@@ -367,7 +373,7 @@ fn live_worker(
         transcript_text = preview_text.clone();
     }
     if let Some(orchestrator) = diarized_orchestrator.as_ref() {
-        let snapshot = orchestrator.snapshot();
+        let snapshot = orchestrator.final_snapshot();
         if !snapshot.markdown.trim().is_empty() {
             if let Some(preview_path) = output_paths.preview_path.as_ref() {
                 let _ = fs::write(preview_path, &snapshot.markdown);
@@ -386,11 +392,6 @@ fn live_worker(
 
     if let Ok(mut state) = runtime_state.lock() {
         crate::ensure_output_entry(&mut state.output_entries, transcript_path.clone(), false);
-        crate::ensure_output_entry(
-            &mut state.output_entries,
-            crate::edited_file_path(&transcript_path),
-            false,
-        );
         state.active_audio_path = Some(recording_path.clone());
         if !state
             .media_entries

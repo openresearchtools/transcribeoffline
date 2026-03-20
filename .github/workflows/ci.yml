@@ -23,9 +23,15 @@ on:
         required: false
         default: ""
         type: string
+      include_ubuntu:
+        description: "Include Ubuntu .deb build in this release"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
+    if: ${{ matrix.label != 'ubuntu-x64' || inputs.include_ubuntu }}
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 60
@@ -154,6 +160,7 @@ jobs:
           path: release-input/macos-arm64
 
       - name: Download ubuntu artifact
+        if: ${{ inputs.include_ubuntu }}
         uses: actions/download-artifact@v4
         with:
           name: ubuntu-x64
@@ -266,7 +273,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          tag="${{ steps.meta.outputs.tag }}"
           version="${{ steps.meta.outputs.version }}"
 
           if [[ -f "release-input/windows-x64/Transcribe Offline.exe" ]]; then
@@ -285,66 +291,68 @@ jobs:
             exit 1
           fi
 
-          if [[ ! -f "release-input/ubuntu-x64/transcribe-offline" ]]; then
-            echo "Missing Ubuntu binary in artifact (release-input/ubuntu-x64/transcribe-offline)." >&2
-            exit 1
+          if [[ "${{ inputs.include_ubuntu }}" == "true" ]]; then
+            if [[ ! -f "release-input/ubuntu-x64/transcribe-offline" ]]; then
+              echo "Missing Ubuntu binary in artifact (release-input/ubuntu-x64/transcribe-offline)." >&2
+              exit 1
+            fi
+            if [[ ! -d "release-input/ubuntu-x64/runtime-manifests" ]]; then
+              echo "Missing Ubuntu runtime manifests in artifact." >&2
+              exit 1
+            fi
+
+            deb_root="release-work/ubuntu-deb"
+            install_root="${deb_root}/usr/lib/transcribe-offline"
+            mkdir -p "${install_root}" \
+              "${deb_root}/usr/bin" \
+              "${deb_root}/usr/share/applications" \
+              "${deb_root}/usr/share/icons/hicolor/256x256/apps" \
+              "${deb_root}/DEBIAN"
+
+            cp -a release-input/ubuntu-x64/. "${install_root}/"
+            rm -f "${install_root}/install-ubuntu.sh" "${install_root}/uninstall-ubuntu.sh"
+            chmod 0755 "${install_root}/transcribe-offline" || true
+
+            cat > "${deb_root}/usr/bin/transcribe-offline" <<'EOF'
+            #!/usr/bin/env bash
+            set -euo pipefail
+            exec /usr/lib/transcribe-offline/transcribe-offline "$@"
+            EOF
+            chmod 0755 "${deb_root}/usr/bin/transcribe-offline"
+
+            if [[ -f "${install_root}/transcribe-offline.png" ]]; then
+              cp "${install_root}/transcribe-offline.png" \
+                "${deb_root}/usr/share/icons/hicolor/256x256/apps/transcribe-offline.png"
+            fi
+
+            cat > "${deb_root}/usr/share/applications/transcribe-offline.desktop" <<'EOF'
+            [Desktop Entry]
+            Type=Application
+            Name=Transcribe Offline
+            Comment=Offline transcription and diarization GUI powered by Openresearchtools-Engine
+            Exec=transcribe-offline
+            Icon=transcribe-offline
+            StartupWMClass=transcribe-offline
+            Terminal=false
+            Categories=AudioVideo;Utility;
+            StartupNotify=true
+            EOF
+
+            cat > "${deb_root}/DEBIAN/control" <<EOF
+            Package: transcribe-offline
+            Version: ${version}
+            Section: audio
+            Priority: optional
+            Architecture: amd64
+            Maintainer: L. Rutkauskas
+            Depends: libasound2, libx11-6, libxkbcommon0, libwayland-client0
+            Description: Offline transcription, diarization, and chat desktop GUI
+             Native desktop wrapper around Openresearchtools-Engine runtime.
+            EOF
+
+            deb_asset="transcribe-offline_${version}_amd64.deb"
+            dpkg-deb --build --root-owner-group "${deb_root}" "release-assets/${deb_asset}"
           fi
-          if [[ ! -d "release-input/ubuntu-x64/runtime-manifests" ]]; then
-            echo "Missing Ubuntu runtime manifests in artifact." >&2
-            exit 1
-          fi
-
-          deb_root="release-work/ubuntu-deb"
-          install_root="${deb_root}/usr/lib/transcribe-offline"
-          mkdir -p "${install_root}" \
-            "${deb_root}/usr/bin" \
-            "${deb_root}/usr/share/applications" \
-            "${deb_root}/usr/share/icons/hicolor/256x256/apps" \
-            "${deb_root}/DEBIAN"
-
-          cp -a release-input/ubuntu-x64/. "${install_root}/"
-          rm -f "${install_root}/install-ubuntu.sh" "${install_root}/uninstall-ubuntu.sh"
-          chmod 0755 "${install_root}/transcribe-offline" || true
-
-          cat > "${deb_root}/usr/bin/transcribe-offline" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          exec /usr/lib/transcribe-offline/transcribe-offline "$@"
-          EOF
-          chmod 0755 "${deb_root}/usr/bin/transcribe-offline"
-
-          if [[ -f "${install_root}/transcribe-offline.png" ]]; then
-            cp "${install_root}/transcribe-offline.png" \
-              "${deb_root}/usr/share/icons/hicolor/256x256/apps/transcribe-offline.png"
-          fi
-
-          cat > "${deb_root}/usr/share/applications/transcribe-offline.desktop" <<'EOF'
-          [Desktop Entry]
-          Type=Application
-          Name=Transcribe Offline
-          Comment=Offline transcription and diarization GUI powered by Openresearchtools-Engine
-          Exec=transcribe-offline
-          Icon=transcribe-offline
-          StartupWMClass=transcribe-offline
-          Terminal=false
-          Categories=AudioVideo;Utility;
-          StartupNotify=true
-          EOF
-
-          cat > "${deb_root}/DEBIAN/control" <<EOF
-          Package: transcribe-offline
-          Version: ${version}
-          Section: audio
-          Priority: optional
-          Architecture: amd64
-          Maintainer: L. Rutkauskas
-          Depends: libasound2, libx11-6, libxkbcommon0, libwayland-client0
-          Description: Offline transcription, diarization, and chat desktop GUI
-           Native desktop wrapper around Openresearchtools-Engine runtime.
-          EOF
-
-          deb_asset="transcribe-offline_${version}_amd64.deb"
-          dpkg-deb --build --root-owner-group "${deb_root}" "release-assets/${deb_asset}"
 
           (cd release-assets && sha256sum * > SHA256SUMS.txt)
 
@@ -369,15 +377,12 @@ jobs:
           mac_url="${base_url}/${mac_asset}"
           linux_url="${base_url}/${linux_asset}"
           sums_url="${base_url}/${sums_asset}"
+          ubuntu_download_line=""
+          ubuntu_install_section=""
 
-          cat > release-body.md <<EOF
-          ## Downloads
-
-          - Windows x64*: [\`${win_asset}\`](${win_url})
-          - macOS arm64*: [\`${mac_asset}\`](${mac_url})
-          - Ubuntu x64 (.deb): [\`${linux_asset}\`](${linux_url})
-          - Checksums: [\`${sums_asset}\`](${sums_url})
-
+          if [[ "${{ inputs.include_ubuntu }}" == "true" ]]; then
+            ubuntu_download_line="- Ubuntu x64 (.deb): [\`${linux_asset}\`](${linux_url})"
+            ubuntu_install_section="$(cat <<EOF
           ## Ubuntu Quick Install (.deb)
 
           This command downloads the Ubuntu package from this release and installs it system-wide:
@@ -388,6 +393,17 @@ jobs:
           curl -fL '${linux_url}' -o /tmp/${linux_asset} && \\
           sudo apt install -y /tmp/${linux_asset}
           \`\`\`
+          EOF
+            )"
+          fi
+
+          cat > release-body.md <<EOF
+          ## Downloads
+
+          - Windows x64*: [\`${win_asset}\`](${win_url})
+          - macOS arm64*: [\`${mac_asset}\`](${mac_url})
+          ${ubuntu_download_line}
+          - Checksums: [\`${sums_asset}\`](${sums_url})
 
           ## Unsigned Build Notice
 
@@ -420,6 +436,8 @@ jobs:
           In the app, after runtime install/repair, click Unblock unsigned runtime then Recheck.
 
           The macOS unblock script removes quarantine attributes recursively (\`xattr -dr com.apple.quarantine\`) and restores executable bits for runtime binaries/scripts where needed (\`chmod +x\` on relevant files).
+
+          ${ubuntu_install_section}
           EOF
 
       - name: Publish GitHub release assets

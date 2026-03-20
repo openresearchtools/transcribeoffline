@@ -310,27 +310,51 @@ pub(crate) fn sortformer_model_path_from_settings(
 fn whisper_combo_label(paths: &AppPaths, spec: &WhisperModelSpec) -> String {
     let model_path = whisper_model_dest_path(paths, spec.file_name);
     if model_path.exists() {
-        format!("{} [installed]", spec.label)
+        format!(
+            "{} ({}) [installed]",
+            spec.label,
+            human_model_size(spec.size_bytes)
+        )
     } else {
-        format!("{} [not installed]", spec.label)
+        format!(
+            "{} ({}) [not installed]",
+            spec.label,
+            human_model_size(spec.size_bytes)
+        )
     }
 }
 
 fn live_model_combo_label(paths: &AppPaths, spec: &LiveModelSpec) -> String {
     let model_path = live_model_dest_path(paths, spec.file_name);
     if model_path.exists() {
-        format!("{} [installed]", spec.label)
+        format!(
+            "{} ({}) [installed]",
+            spec.label,
+            human_model_size(spec.size_bytes)
+        )
     } else {
-        format!("{} [not installed]", spec.label)
+        format!(
+            "{} ({}) [not installed]",
+            spec.label,
+            human_model_size(spec.size_bytes)
+        )
     }
 }
 
 fn chat_model_combo_label(paths: &AppPaths, spec: &ChatModelSpec) -> String {
     let model_path = chat_model_dest_path(paths, spec.file_name);
     if model_path.exists() {
-        format!("{} [installed]", spec.label)
+        format!(
+            "{} ({}) [installed]",
+            spec.label,
+            human_model_size(spec.size_bytes)
+        )
     } else {
-        format!("{} [not installed]", spec.label)
+        format!(
+            "{} ({}) [not installed]",
+            spec.label,
+            human_model_size(spec.size_bytes)
+        )
     }
 }
 
