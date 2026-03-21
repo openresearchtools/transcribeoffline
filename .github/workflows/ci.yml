@@ -496,7 +496,7 @@ jobs:
 
           if [[ "${{ inputs.include_ubuntu }}" == "true" ]]; then
             ubuntu_download_line="- Ubuntu x64 (.deb): [\`${linux_asset}\`](${linux_url})"
-            ubuntu_install_section="$(cat <<EOF
+            ubuntu_install_section="$(cat <<UBUNTU_INSTALL_SECTION
           ## Ubuntu Quick Install (.deb)
 
           This command downloads the Ubuntu package from this release and installs it system-wide:
@@ -507,11 +507,11 @@ jobs:
           curl -fL '${linux_url}' -o /tmp/${linux_asset} && \\
           sudo apt install -y /tmp/${linux_asset}
           \`\`\`
-          EOF
+          UBUNTU_INSTALL_SECTION
             )"
           fi
 
-          cat > release-body.md <<EOF
+          cat > release-body.md <<RELEASE_BODY
           ## Downloads
 
           - Windows x64*: [\`${win_asset}\`](${win_url})
@@ -552,7 +552,7 @@ jobs:
           The macOS unblock script removes quarantine attributes recursively (\`xattr -dr com.apple.quarantine\`) and restores executable bits for runtime binaries/scripts where needed (\`chmod +x\` on relevant files).
 
           ${ubuntu_install_section}
-          EOF
+          RELEASE_BODY
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
