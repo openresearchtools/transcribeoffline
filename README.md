@@ -7,7 +7,8 @@ speaker diarization, and transcript review/edit workflows.
 It is implemented as a native Rust/egui GUI on top of
 [`Openresearchtools-Engine`](https://github.com/openresearchtools/engine).
 
-
+- Windows x64*: [**Transcribe-Offline.exe**](https://github.com/openresearchtools/transcribeoffline/releases/download/2.0/Transcribe-Offline-windows-x64.exe)
+- macOS arm64*: [**Transcribe-offline.dmg**](https://github.com/openresearchtools/transcribeoffline/releases/download/2.0/transcribe-offline-macos-arm64.dmg)
 
 ## NOW AVAILABLE! Realtime Live Transcription + Live Speaker Diarization
 
