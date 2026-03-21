@@ -7,20 +7,23 @@ speaker diarization, and transcript review/edit workflows.
 It is implemented as a native Rust/egui GUI on top of
 [`Openresearchtools-Engine`](https://github.com/openresearchtools/engine).
 
+![Now Available](https://img.shields.io/badge/NOW_AVAILABLE-Realtime_Live_Transcription-ff6b35?style=for-the-badge)
+![Live Diarization](https://img.shields.io/badge/Realtime_Live_Speaker_Diarization-Sortformer-0ea5e9?style=for-the-badge)
+![Acceleration](https://img.shields.io/badge/CUDA%20%7C%20Vulkan%20%7C%20Metal-Accelerated-16a34a?style=for-the-badge)
 
-> ## NOW AVAILABLE! Realtime Live Transcription + Live Speaker Diarization
->
-> **Transcribe Offline now supports true realtime live transcription with true realtime live speaker diarization.**
->
-> This is not a batch-style “record a chunk, stop, and transcribe later” workflow. The live pipeline is designed around continuous streaming audio, continuous session state, and sliding-context realtime model execution so transcription and speaker diarization can update as speech is happening.
->
-> This was made possible by the native runtime work in [`Openresearchtools-Engine`](https://github.com/openresearchtools/engine), which extends a `ggml` / `llama.cpp`-based backend with the in-process bridge, streaming audio session handling, realtime decoding logic, and backend support needed to run these models locally with **CUDA**, **Vulkan**, and **Metal** acceleration.
->
-> For live transcription, this app uses converted realtime GGUF artifacts published at [`openresearchtools/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602), based on the upstream Voxtral realtime model from [`mistralai/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602).
->
-> For live speaker diarization, this app uses converted GGUF artifacts published at [`openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf`](https://huggingface.co/openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf), based on the upstream NVIDIA Sortformer model from [`nvidia/diar_streaming_sortformer_4spk-v2.1`](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1).
->
-> We are grateful to the original model creators and upstream projects for making these capabilities possible. Our use, conversion, packaging, and local runtime integration of these models does **not** imply endorsement, sponsorship, or affiliation by upstream authors or maintainers of packages and models.
+## NOW AVAILABLE! Realtime Live Transcription + Live Speaker Diarization
+
+**Transcribe Offline now supports true realtime live transcription with true realtime live speaker diarization.**
+
+This is not a batch-style “record a chunk, stop, and transcribe later” workflow. The live pipeline is designed around continuous streaming audio, continuous session state, and sliding-context realtime model execution so transcription and speaker diarization can update as speech is happening.
+
+This was made possible by the native runtime work in [`Openresearchtools-Engine`](https://github.com/openresearchtools/engine), which extends a `ggml` / `llama.cpp`-based backend with the in-process bridge, streaming audio session handling, realtime decoding logic, and backend support needed to run these models locally with **CUDA**, **Vulkan**, and **Metal** acceleration.
+
+For live transcription, this app uses converted realtime GGUF artifacts published at [`openresearchtools/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602), based on the upstream Voxtral realtime model from [`mistralai/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602).
+
+For live speaker diarization, this app uses converted GGUF artifacts published at [`openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf`](https://huggingface.co/openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf), based on the upstream NVIDIA Sortformer model from [`nvidia/diar_streaming_sortformer_4spk-v2.1`](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1).
+
+We are grateful to the original model creators and upstream projects for making these capabilities possible. Our use, conversion, packaging, and local runtime integration of these models does **not** imply endorsement, sponsorship, or affiliation by upstream authors or maintainers of packages and models.
 
 
 ## What it does
