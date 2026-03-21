@@ -253,7 +253,7 @@ jobs:
 
   release:
     name: Publish Release Assets
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release == true && needs.build.result == 'success' && (needs.build-ubuntu.result == 'success' || needs.build-ubuntu.result == 'skipped') }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.publish_release == true && needs.build.result == 'success' && (needs['build-ubuntu'].result == 'success' || needs['build-ubuntu'].result == 'skipped') }}
     needs:
       - build
       - build-ubuntu
