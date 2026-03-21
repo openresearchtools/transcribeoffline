@@ -427,11 +427,11 @@ jobs:
             rm -f "${install_root}/install-ubuntu.sh" "${install_root}/uninstall-ubuntu.sh"
             chmod 0755 "${install_root}/transcribe-offline" || true
 
-            cat > "${deb_root}/usr/bin/transcribe-offline" <<'EOF'
-            #!/usr/bin/env bash
-            set -euo pipefail
-            exec /usr/lib/transcribe-offline/transcribe-offline "$@"
-            EOF
+            printf '%s\n' \
+              '#!/usr/bin/env bash' \
+              'set -euo pipefail' \
+              'exec /usr/lib/transcribe-offline/transcribe-offline "$@"' \
+              > "${deb_root}/usr/bin/transcribe-offline"
             chmod 0755 "${deb_root}/usr/bin/transcribe-offline"
 
             if [[ -f "${install_root}/transcribe-offline.png" ]]; then
@@ -439,30 +439,30 @@ jobs:
                 "${deb_root}/usr/share/icons/hicolor/256x256/apps/transcribe-offline.png"
             fi
 
-            cat > "${deb_root}/usr/share/applications/transcribe-offline.desktop" <<'EOF'
-            [Desktop Entry]
-            Type=Application
-            Name=Transcribe Offline
-            Comment=Offline transcription and diarization GUI powered by Openresearchtools-Engine
-            Exec=transcribe-offline
-            Icon=transcribe-offline
-            StartupWMClass=transcribe-offline
-            Terminal=false
-            Categories=AudioVideo;Utility;
-            StartupNotify=true
-            EOF
+            printf '%s\n' \
+              '[Desktop Entry]' \
+              'Type=Application' \
+              'Name=Transcribe Offline' \
+              'Comment=Offline transcription and diarization GUI powered by Openresearchtools-Engine' \
+              'Exec=transcribe-offline' \
+              'Icon=transcribe-offline' \
+              'StartupWMClass=transcribe-offline' \
+              'Terminal=false' \
+              'Categories=AudioVideo;Utility;' \
+              'StartupNotify=true' \
+              > "${deb_root}/usr/share/applications/transcribe-offline.desktop"
 
-            cat > "${deb_root}/DEBIAN/control" <<EOF
-            Package: transcribe-offline
-            Version: ${version}
-            Section: audio
-            Priority: optional
-            Architecture: amd64
-            Maintainer: L. Rutkauskas
-            Depends: libasound2, libx11-6, libxkbcommon0, libwayland-client0
-            Description: Offline transcription, diarization, and chat desktop GUI
-             Native desktop wrapper around Openresearchtools-Engine runtime.
-            EOF
+            printf '%s\n' \
+              'Package: transcribe-offline' \
+              "Version: ${version}" \
+              'Section: audio' \
+              'Priority: optional' \
+              'Architecture: amd64' \
+              'Maintainer: L. Rutkauskas' \
+              'Depends: libasound2, libx11-6, libxkbcommon0, libwayland-client0' \
+              'Description: Offline transcription, diarization, and chat desktop GUI' \
+              ' Native desktop wrapper around Openresearchtools-Engine runtime.' \
+              > "${deb_root}/DEBIAN/control"
 
             deb_asset="transcribe-offline_${version}_amd64.deb"
             dpkg-deb --build --root-owner-group "${deb_root}" "release-assets/${deb_asset}"
@@ -496,19 +496,17 @@ jobs:
 
           if [[ "${{ inputs.include_ubuntu }}" == "true" ]]; then
             ubuntu_download_line="- Ubuntu x64 (.deb): [\`${linux_asset}\`](${linux_url})"
-            ubuntu_install_section="$(cat <<UBUNTU_INSTALL_SECTION
-          ## Ubuntu Quick Install (.deb)
-
-          This command downloads the Ubuntu package from this release and installs it system-wide:
-          - App menu entry: \`Transcribe Offline\`
-          - Launcher command: \`transcribe-offline\`
-
-          \`\`\`bash
-          curl -fL '${linux_url}' -o /tmp/${linux_asset} && \\
-          sudo apt install -y /tmp/${linux_asset}
-          \`\`\`
-          UBUNTU_INSTALL_SECTION
-            )"
+            ubuntu_install_section="$(printf '%s\n' \
+              '## Ubuntu Quick Install (.deb)' \
+              '' \
+              'This command downloads the Ubuntu package from this release and installs it system-wide:' \
+              '- App menu entry: \`Transcribe Offline\`' \
+              '- Launcher command: \`transcribe-offline\`' \
+              '' \
+              '\`\`\`bash' \
+              "curl -fL '${linux_url}' -o /tmp/${linux_asset} && \\\\" \
+              "sudo apt install -y /tmp/${linux_asset}" \
+              '\`\`\`')"
           fi
 
           cat > release-body.md <<RELEASE_BODY
