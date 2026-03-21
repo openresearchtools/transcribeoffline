@@ -269,16 +269,12 @@ New-Item -ItemType Directory -Force -Path $engineUpstreamDir | Out-Null
 
 $officialEngineFiles = @(
   [pscustomobject]@{
-    Name = "LICENSES-cuda.txt"
-    Url = "https://raw.githubusercontent.com/openresearchtools/engine/main/third_party/licenses/LICENSES-cuda.txt"
+    Name = "LICENSES.md"
+    Url = "https://raw.githubusercontent.com/openresearchtools/engine/main/third_party/LICENSES.md"
   },
   [pscustomobject]@{
-    Name = "LICENSES.txt"
-    Url = "https://raw.githubusercontent.com/openresearchtools/engine/main/third_party/licenses/LICENSES.txt"
-  },
-  [pscustomobject]@{
-    Name = "README-licenses.md"
-    Url = "https://raw.githubusercontent.com/openresearchtools/engine/main/third_party/licenses/README.md"
+    Name = "README.md"
+    Url = "https://raw.githubusercontent.com/openresearchtools/engine/main/third_party/README.md"
   }
 )
 
@@ -431,23 +427,24 @@ if ($reviewLines.Count -eq 0) {
 $licenseIndex = @(
   "# License Index (Transcribe Offline)",
   "",
-  "## Read in this order",
+  "## Bundled outputs",
   "",
   "1. THIRD_PARTY_NOTICES_ALL.md",
-  "2. APP_THIRD_PARTY_LICENSES_FULL.md",
+  "2. THIRD_PARTY_LICENSES_ALL.md",
   "3. ENGINE_THIRD_PARTY_LICENSES_FULL.md",
-  "4. MODEL_NOTICES_AND_CITATIONS.md",
-  "5. RUST_DEPENDENCIES_FULL.md",
-  "6. upstream/README.md",
+  "",
+  "These are the markdown files bundled into the app binary.",
   "",
   "## Folder contents",
   "",
   "- Consolidated notice page (app + models + engine): THIRD_PARTY_NOTICES_ALL.md",
-  "- Full app licenses per package (with full text): APP_THIRD_PARTY_LICENSES_FULL.md",
+  "- Full app licenses per package (with full text): THIRD_PARTY_LICENSES_ALL.md",
   "- Full engine licenses per package/file (with full text): ENGINE_THIRD_PARTY_LICENSES_FULL.md",
+  "",
+  "## Temporary generation inputs",
+  "",
+  "- Full app licenses per package before bundling: APP_THIRD_PARTY_LICENSES_FULL.md",
   "- Rust dependency inventory: RUST_DEPENDENCIES_FULL.md",
-  "- Engine notices: ENGINE_THIRD_PARTY_NOTICES.md",
-  "- Engine key-license summary: ENGINE_THIRD_PARTY_LICENSES.md",
   "- Official engine snapshot files: upstream/openresearchtools-engine/*",
   "- Rust crate license files copied from local Cargo registry: upstream/rust-crates/*",
   "- Model notices and citations: MODEL_NOTICES_AND_CITATIONS.md",
@@ -558,201 +555,96 @@ $modelNotices = @(
   "",
   "## Whisper models",
   "",
-  "- Download source used by app (converted artifacts): https://huggingface.co/ggerganov/whisper.cpp",
-  "- Original upstream model card reference: https://huggingface.co/openai/whisper-large-v3",
-  "- Model card license reference at time of writing: apache-2.0.",
+  "- Download sources used by app (converted artifacts):",
+  "  - https://huggingface.co/openresearchtools/whisper-large-v3-turbo-GGML",
+  "  - https://huggingface.co/openresearchtools/whisper-large-v3-GGML",
+  "- Original upstream model card references:",
+  "  - https://huggingface.co/openai/whisper-large-v3-turbo",
+  "  - https://huggingface.co/openai/whisper-large-v3",
+  "- Model card license references at time of writing:",
+  "  - whisper-large-v3-turbo: mit",
+  "  - whisper-large-v3: apache-2.0",
   "- Runtime artifact format: GGML.",
   "- Conversion notice: distributed artifacts are conversion/interoperability outputs and may differ from original upstream packaging.",
   "- Non-affiliation notice: listing or bundling does not imply affiliation with or endorsement by original authors.",
   "- Users are responsible for complying with upstream model terms.",
   "",
-  "## Diarization models (pyannote lineage)",
+  "## Voxtral realtime live transcription models",
   "",
-  "- Download source used by app (converted artifacts): https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF",
-  "- Original upstream model card reference: https://huggingface.co/pyannote/speaker-diarization-community-1",
-  "- Model card license reference at time of writing: cc-by-4.0.",
+  "- Download source used by app (converted artifacts): https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602",
+  "- Original upstream model card reference: https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602",
+  "- Model card license reference at time of writing: apache-2.0.",
   "- Runtime artifact format: GGUF.",
   "- Conversion notice: distributed artifacts are conversion/interoperability outputs.",
   "- Non-affiliation notice: listing or bundling does not imply affiliation with or endorsement by original authors.",
   "",
-  "## WeSpeaker embedding model",
+  "## NVIDIA Sortformer live diarization model",
   "",
-  "- Used in diarization pipeline lineage and cited here as an original upstream model component.",
-  "- Primary citation is listed below (Wang et al., ICASSP 2023).",
+  "- Download source used by app (converted artifacts): https://huggingface.co/openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf",
+  "- Original upstream model card reference: https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1",
+  "- Model card license reference at time of writing: apache-2.0.",
+  "- Runtime artifact format: GGUF.",
+  "- Conversion notice: distributed artifacts are conversion/interoperability outputs.",
+  "- Non-affiliation notice: listing or bundling does not imply affiliation with or endorsement by original authors.",
+  "",
+  "## Local chat / anonymisation model",
+  "",
+  "- Suggested download source used by app (GGUF artifacts): https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF",
+  "- Original upstream model family reference: https://huggingface.co/Qwen/Qwen3.5-9B",
+  "- Model card license reference at time of writing: apache-2.0.",
+  "- Runtime artifact format: GGUF.",
+  "- Conversion notice: distributed artifacts are conversion/interoperability outputs.",
   "- Non-affiliation notice: listing or bundling does not imply affiliation with or endorsement by original authors.",
   "",
   "## Upstream original citations",
   "",
-  "Upstream original speaker segmentation citation:",
-  "@inproceedings{Plaquet23, title={Powerset multi-class cross entropy loss for neural speaker diarization}, year=2023, booktitle={Proc. INTERSPEECH 2023}}",
+  "Whisper original reference:",
+  "@misc{Radford2022Whisper, title={Robust Speech Recognition via Large-Scale Weak Supervision}, author={Alec Radford and Jong Wook Kim and Tao Xu and Greg Brockman and Christine McLeavey and Ilya Sutskever}, year={2022}, eprint={2212.04356}, archivePrefix={arXiv}, primaryClass={eess.AS}}",
   "",
-  "Upstream original speaker embedding citation:",
-  "@inproceedings{Wang2023, title={Wespeaker: A research and production oriented speaker embedding learning toolkit}, year=2023, booktitle={ICASSP 2023}}",
+  "Voxtral original reference:",
+  "@misc{MistralVoxtralRealtime2026, title={Voxtral Mini 4B Realtime}, author={Mistral AI}, year={2026}, howpublished={Hugging Face model card}}",
   "",
-  "Upstream original speaker clustering citation:",
-  "@article{Landini2022, title={Bayesian HMM clustering of x-vector sequences (VBx) in speaker diarization}, year=2022, journal={Computer Speech & Language}}"
+  "Sortformer original reference:",
+  "@misc{NvidiaSortformer2026, title={diar_streaming_sortformer_4spk-v2.1}, author={NVIDIA}, year={2026}, howpublished={Hugging Face model card}}",
+  "",
+  "Qwen original reference:",
+  "@misc{Qwen35_2025, title={Qwen3.5-9B}, author={Qwen Team}, year={2025}, howpublished={Hugging Face model card}}"
 ) -join "`n"
 Write-Utf8File -Path $modelNoticesOut -Content $modelNotices
 
-$officialCudaLicensePath = Join-Path $engineUpstreamDir "LICENSES-cuda.txt"
-$officialCudaLicenseText = if (Test-Path -LiteralPath $officialCudaLicensePath -PathType Leaf) {
-  Read-TextFileSafe -Path $officialCudaLicensePath
+$officialEngineLicensePath = Join-Path $engineUpstreamDir "LICENSES.md"
+$officialEngineLicenseText = if (Test-Path -LiteralPath $officialEngineLicensePath -PathType Leaf) {
+  Read-TextFileSafe -Path $officialEngineLicensePath
 } else {
   ""
 }
-$officialCudaRuntimeNoticeBlock = if (-not [string]::IsNullOrWhiteSpace($officialCudaLicenseText)) {
-  Extract-BetweenMarkers `
-    -Text $officialCudaLicenseText `
-    -BeginMarker "BEGIN: nvidia-cuda-runtime-NOTICE" `
-    -EndMarker "END: nvidia-cuda-runtime-NOTICE"
+$officialEngineReadmePath = Join-Path $engineUpstreamDir "README.md"
+$officialEngineReadmeText = if (Test-Path -LiteralPath $officialEngineReadmePath -PathType Leaf) {
+  Read-TextFileSafe -Path $officialEngineReadmePath
 } else {
   ""
 }
-$officialCudaEulaBlock = if (-not [string]::IsNullOrWhiteSpace($officialCudaLicenseText)) {
-  Extract-BetweenMarkers `
-    -Text $officialCudaLicenseText `
-    -BeginMarker "BEGIN: nvidia-cuda-EULA" `
-    -EndMarker "END: nvidia-cuda-EULA"
-} else {
-  ""
-}
-$officialFfmpegBuildBlock = if (-not [string]::IsNullOrWhiteSpace($officialCudaLicenseText)) {
-  Extract-BetweenMarkers `
-    -Text $officialCudaLicenseText `
-    -BeginMarker "BEGIN: ffmpeg-builds-LICENSE" `
-    -EndMarker "END: ffmpeg-builds-LICENSE"
-} else {
-  ""
-}
-$officialFfmpegLgplBlock = if (-not [string]::IsNullOrWhiteSpace($officialCudaLicenseText)) {
-  Extract-BetweenMarkers `
-    -Text $officialCudaLicenseText `
-    -BeginMarker "BEGIN: ffmpeg-LGPL-2.1" `
-    -EndMarker "END: ffmpeg-LGPL-2.1"
-} else {
-  ""
-}
-$officialPdfiumRenderBlock = if (-not [string]::IsNullOrWhiteSpace($officialCudaLicenseText)) {
-  Extract-BetweenMarkers `
-    -Text $officialCudaLicenseText `
-    -BeginMarker "BEGIN: pdfium-render-LICENSE" `
-    -EndMarker "END: pdfium-render-LICENSE"
-} else {
-  ""
-}
-$officialPdfiumLicenseBlock = if (-not [string]::IsNullOrWhiteSpace($officialCudaLicenseText)) {
-  Extract-BetweenMarkers `
-    -Text $officialCudaLicenseText `
-    -BeginMarker "BEGIN: pdfium-LICENSE" `
-    -EndMarker "END: pdfium-LICENSE"
-} else {
-  ""
-}
-$officialPdfiumBinariesBlock = if (-not [string]::IsNullOrWhiteSpace($officialCudaLicenseText)) {
-  Extract-BetweenMarkers `
-    -Text $officialCudaLicenseText `
-    -BeginMarker "BEGIN: pdfium-binaries-LICENSE" `
-    -EndMarker "END: pdfium-binaries-LICENSE"
-} else {
-  ""
-}
-$cudaRuntimeNoticeForPage = if (-not [string]::IsNullOrWhiteSpace($officialCudaRuntimeNoticeBlock)) {
-  $officialCudaRuntimeNoticeBlock.Trim()
-} else {
-  "CUDA runtime notice block not found in official engine LICENSES-cuda.txt snapshot."
-}
-$cudaEulaForPage = if (-not [string]::IsNullOrWhiteSpace($officialCudaEulaBlock)) {
-  $officialCudaEulaBlock.Trim()
-} else {
-  "CUDA EULA block not found in official engine LICENSES-cuda.txt snapshot."
-}
-$engineCombinedLicenseForPage = if (-not [string]::IsNullOrWhiteSpace($officialCudaLicenseText)) {
-  $markerMatch = [regex]::Match($officialCudaLicenseText, '(?s)BEGIN: Openresearchtools-Engine \[LICENSE\].*')
+$engineCombinedLicenseForPage = if (-not [string]::IsNullOrWhiteSpace($officialEngineLicenseText)) {
+  $markerMatch = [regex]::Match($officialEngineLicenseText, '(?s)BEGIN: Openresearchtools-Engine \[LICENSE\].*')
   if ($markerMatch.Success) {
     $markerMatch.Value.Trim()
   } else {
-    $officialCudaLicenseText.Trim()
+    $officialEngineLicenseText.Trim()
   }
 } else {
   "Engine combined license bundle not found."
 }
-$ffmpegBuildForPage = if (-not [string]::IsNullOrWhiteSpace($officialFfmpegBuildBlock)) {
-  $officialFfmpegBuildBlock.Trim()
+$engineNotices = if (-not [string]::IsNullOrWhiteSpace($officialEngineReadmeText)) {
+  $officialEngineReadmeText.Trim()
 } else {
-  "FFmpeg build notice block not found in official engine LICENSES-cuda.txt snapshot."
+  "Engine notices unavailable."
 }
-$ffmpegLgplForPage = if (-not [string]::IsNullOrWhiteSpace($officialFfmpegLgplBlock)) {
-  $officialFfmpegLgplBlock.Trim()
-} else {
-  "FFmpeg LGPL block not found in official engine LICENSES-cuda.txt snapshot."
-}
-$pdfiumRenderForPage = if (-not [string]::IsNullOrWhiteSpace($officialPdfiumRenderBlock)) {
-  $officialPdfiumRenderBlock.Trim()
-} else {
-  "PDFium render notice block not found in official engine LICENSES-cuda.txt snapshot."
-}
-$pdfiumLicenseForPage = if (-not [string]::IsNullOrWhiteSpace($officialPdfiumLicenseBlock)) {
-  $officialPdfiumLicenseBlock.Trim()
-} else {
-  "PDFium license block not found in official engine LICENSES-cuda.txt snapshot."
-}
-$pdfiumBinariesForPage = if (-not [string]::IsNullOrWhiteSpace($officialPdfiumBinariesBlock)) {
-  $officialPdfiumBinariesBlock.Trim()
-} else {
-  "PDFium binaries license block not found in official engine LICENSES-cuda.txt snapshot."
-}
-$windowsCudaOptionalNotice = "Windows users may choose a CUDA or Vulkan engine runtime; NVIDIA CUDA EULA and CUDA runtime notice terms apply only when a Windows build bundles or uses NVIDIA CUDA runtime binaries (for example, cudart/cublas DLLs)."
-
-$engineNotices = @(
-  "# Engine Notices",
-  "",
-  "These notices describe bundled runtime provenance/build facts for Openresearchtools-Engine.",
-  "Full legal texts (FFmpeg LGPL, PDFium licenses, NVIDIA CUDA EULA/runtime notice, whisper.cpp, pyannote.audio, and others) are in Engine licenses.",
-  "",
-  "## FFmpeg runtime (LGPL shared)",
-  "",
-  "- Purpose: raw-audio normalization for transcription requests (convert to WAV 16-bit mono 16 kHz before endpoint call).",
-  "- Windows x64 retrieval source: https://github.com/BtbN/FFmpeg-Builds",
-  "- Windows workflow reference: https://github.com/openresearchtools/engine/blob/main/.github/workflows/windows-x64.yml",
-  "- Windows asset pattern: *win64-lgpl-shared*.zip",
-  "- Ubuntu x64 retrieval source: https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest",
-  "- Ubuntu asset name: ffmpeg-master-latest-linux64-lgpl-shared.tar.xz",
-  "- Ubuntu workflow reference: https://github.com/openresearchtools/engine/blob/main/.github/workflows/ubuntu-x64.yml",
-  "- macOS arm64 source-build reference: https://github.com/openresearchtools/engine/blob/main/.github/workflows/macos-arm64.yml",
-  "- macOS pinned FFmpeg tag/commit (upstream notice): n8.0.1 / 894da5ca7d742e4429ffb2af534fcda0103ef593",
-  "- macOS LGPL configure flags (upstream workflow): --enable-shared --disable-static --disable-gpl --disable-version3 --disable-nonfree --disable-autodetect --disable-xlib --disable-libxcb --disable-libxcb-shm --disable-libxcb-xfixes --disable-libxcb-shape --disable-vulkan --disable-libplacebo --enable-pic --disable-programs --disable-doc --cc=clang --arch=arm64 --target-os=darwin",
-  "- FFmpeg license texts are in Engine licenses.",
-  "",
-  "## PDFium runtime",
-  "",
-  "- Purpose: PDF rasterization for pdf/pdfvlm modules.",
-  "- Engine runtime location: third_party/pdfium",
-  "- App runtime lookup by OS: vendor/pdfium/pdfium.dll (Windows), vendor/pdfium/libpdfium.dylib (macOS), vendor/pdfium/libpdfium.so (Linux).",
-  "- Binary source used by engine: https://github.com/bblanchon/pdfium-binaries",
-  "- Upstream notice reference: https://github.com/openresearchtools/engine/blob/main/third_party/licenses/README.md",
-  "- PDFium license texts are in Engine licenses.",
-  "",
-  "## CUDA runtime (Windows optional)",
-  "",
-  "- Windows users may choose a CUDA runtime build or a Vulkan runtime build.",
-  "- NVIDIA CUDA terms apply only when a Windows CUDA runtime build bundles/uses NVIDIA CUDA runtime binaries (for example, cudart/cublas DLLs).",
-  "- Typical CUDA DLLs in CUDA builds: cublas64_13.dll, cublasLt64_13.dll, cudart64_13.dll.",
-  "- Official NVIDIA CUDA EULA page: https://docs.nvidia.com/cuda/eula/index.html",
-  "- NVIDIA CUDA EULA and runtime notice full texts are in Engine licenses.",
-  "",
-  "## pyannote.audio lineage notice (engine runtime)",
-  "",
-  "- Engine diarization path uses a native C++ pipeline derived from pyannote.audio structure/metadata semantics.",
-  "- Runtime endpoint path does not invoke Python.",
-  "- Non-endorsement: this C++ reimplementation and its use in Transcribe Offline are not endorsed by original pyannote authors/maintainers.",
-  "- pyannote.audio license text is in Engine licenses."
-) -join "`n"
 Write-Utf8File -Path (Join-Path $licensesDir "ENGINE_THIRD_PARTY_NOTICES.md") -Content $engineNotices
 
 $engineLicenses = @(
   "# Engine Licenses",
   "",
-  $windowsCudaOptionalNotice
+  "See ENGINE_THIRD_PARTY_LICENSES_FULL.md for the current engine license bundle."
 ) -join "`n"
 Write-Utf8File -Path (Join-Path $licensesDir "ENGINE_THIRD_PARTY_LICENSES.md") -Content $engineLicenses
 
@@ -793,8 +685,6 @@ $engineFullBuilder = New-Object System.Text.StringBuilder
 [void]$engineFullBuilder.AppendLine("~~~~text")
 [void]$engineFullBuilder.AppendLine($engineCombinedLicenseForPage)
 [void]$engineFullBuilder.AppendLine("~~~~")
-[void]$engineFullBuilder.AppendLine("")
-[void]$engineFullBuilder.AppendLine($windowsCudaOptionalNotice)
 Write-Utf8File -Path (Join-Path $licensesDir "ENGINE_THIRD_PARTY_LICENSES_FULL.md") -Content $engineFullBuilder.ToString()
 
 $modelNoticesContent = if (Test-Path -LiteralPath $modelNoticesOut -PathType Leaf) {

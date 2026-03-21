@@ -1,8 +1,5 @@
 # Transcribe Offline
 
-> [!WARNING]
-> **Active development notice:** This branch is under active development and may change frequently. Speaker diarization currently supports conversations with up to 2 speakers only. For stable use, please use the [`Legacy` branch](https://github.com/openresearchtools/transcribeoffline/tree/Legacy).
-
 ![Transcribe Offline Demo](Demo.png)
  
 **Transcribe Offline** is an open-source desktop app for local transcription,
@@ -10,13 +7,28 @@ speaker diarization, and transcript review/edit workflows.
 It is implemented as a native Rust/egui GUI on top of
 [`Openresearchtools-Engine`](https://github.com/openresearchtools/engine).
 
-It focuses on:
+
+> ## NOW AVAILABLE! Realtime Live Transcription + Live Speaker Diarization
+>
+> **Transcribe Offline now supports true realtime live transcription with true realtime live speaker diarization.**
+>
+> This is not a batch-style “record a chunk, stop, and transcribe later” workflow. The live pipeline is designed around continuous streaming audio, continuous session state, and sliding-context realtime model execution so transcription and speaker diarization can update as speech is happening.
+>
+> This was made possible by the native runtime work in [`Openresearchtools-Engine`](https://github.com/openresearchtools/engine), which extends a `ggml` / `llama.cpp`-based backend with the in-process bridge, streaming audio session handling, realtime decoding logic, and backend support needed to run these models locally with **CUDA**, **Vulkan**, and **Metal** acceleration.
+>
+> For live transcription, this app uses converted realtime GGUF artifacts published at [`openresearchtools/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602), based on the upstream Voxtral realtime model from [`mistralai/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602).
+>
+> For live speaker diarization, this app uses converted GGUF artifacts published at [`openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf`](https://huggingface.co/openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf), based on the upstream NVIDIA Sortformer model from [`nvidia/diar_streaming_sortformer_4spk-v2.1`](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1).
+>
+> We are grateful to the original model creators and upstream projects for making these capabilities possible. Our use, conversion, packaging, and local runtime integration of these models does **not** imply endorsement, sponsorship, or affiliation by upstream authors or maintainers of packages and models.
+
+
+## What it does
 - transcription workflows (`speech` / `subtitle` / `transcript`),
+- realtime live transcription with optional live speaker diarization,
 - speaker diarization,
 - local transcript chat and anonymisation,
 - and desktop-first editing/playback flows.
-
-## What it does
 
 ### 1) Local transcription modes
 Runs the engine audio path for:
@@ -25,7 +37,8 @@ Runs the engine audio path for:
 - `transcript` output with speaker diarization.
 
 ### 2) Speaker diarization
-Uses the engine's native C++ pyannote-style diarization integration and model packs. 
+Uses the engine's native realtime Sortformer diarization path together with the
+offline transcript assembly/sanitization flow.
 
 ### 3) Transcript review and editing
 Provides side-by-side transcript/edit views, playback-linked navigation, autosave,
@@ -102,7 +115,9 @@ If your environment blocks unsigned binaries, the recommended path is:
 
 - `Transcribe Offline` is a reference example of integrating Openresearchtools-Engine in a native desktop GUI.
 - This app uses `llama-server-bridge` from Openresearchtools-Engine.
-- Openresearchtools-Engine runs on a modified `llama.cpp` runtime path to support a native C++ pyannote-style diarization pipeline.
+- Openresearchtools-Engine runs on a modified `llama.cpp` runtime path with native
+  Whisper transcription, Voxtral realtime transcription, and Sortformer
+  diarization integrations.
 - This desktop app itself is a wrapper/orchestrator around that runtime.
 - This desktop app relies on Openresearchtools-Engine runtime media components (FFmpeg/PDFium) at runtime.
 
@@ -116,8 +131,12 @@ If your environment blocks unsigned binaries, the recommended path is:
   core inference runtime and device/offload mechanics used through Openresearchtools-Engine.
 - [`whisper.cpp`](https://github.com/ggml-org/whisper.cpp):
   transcription backbone used by the engine audio pipeline.
-- [`pyannote.audio`](https://github.com/pyannote/pyannote-audio) and [`WeSpeaker`](https://github.com/wenet-e2e/wespeaker):
-  diarization lineage and model/pipeline provenance used by the engine's native C++ diarization path.
+- [`mistralai/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602):
+  upstream realtime speech-to-text model reference used for the app's live transcription path.
+- [`nvidia/diar_streaming_sortformer_4spk-v2.1`](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1):
+  upstream realtime diarization model reference used for the app's live diarization path.
+- [`Qwen/Qwen3.5-9B`](https://huggingface.co/Qwen/Qwen3.5-9B):
+  upstream local chat/anonymisation model family reference used by the app's managed GGUF downloads.
 - [`FFmpeg`](https://github.com/FFmpeg/FFmpeg) (LGPL shared runtime builds):
   media decoding/normalization path used by Openresearchtools-Engine runtime for audio conversion.
 - [`Symphonia`](https://github.com/pdeljanov/Symphonia):
@@ -131,10 +150,18 @@ If your environment blocks unsigned binaries, the recommended path is:
 - [`openai/whisper-large-v3-turbo`](https://huggingface.co/openai/whisper-large-v3-turbo)
   and [`openai/whisper-large-v3`](https://huggingface.co/openai/whisper-large-v3):
   upstream Whisper model family references for the managed transcription downloads.
-- [`openresearchtools/speaker-diarization-community-1-GGUF`](https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF):
-  diarization model-pack repository used by the engine diarization path in this app.
-- [`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1):
-  upstream diarization pipeline lineage referenced by the OpenResearchTools conversion path.
+- [`openresearchtools/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602):
+  converted realtime Voxtral artifacts used by the app's live transcription downloads.
+- [`mistralai/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602):
+  upstream Voxtral realtime model family reference for the managed live downloads.
+- [`openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf`](https://huggingface.co/openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf):
+  converted Sortformer diarization artifact used by the app's live diarization path.
+- [`nvidia/diar_streaming_sortformer_4spk-v2.1`](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1):
+  upstream Sortformer diarization model reference for the managed live downloads.
+- [`openresearchtools/Qwen3.5-9B-GGUF`](https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF):
+  converted GGUF chat/anonymisation artifacts used by the app's local chat helpers.
+- [`Qwen/Qwen3.5-9B`](https://huggingface.co/Qwen/Qwen3.5-9B):
+  upstream chat model family reference for the managed local LLM downloads.
 
 ## Non-endorsement statement
 
@@ -151,7 +178,7 @@ The Transcribe Offline application source code is licensed under the MIT License
 Read these files in this repo:
 
 - Notice page (app + models + engine): `licenses/THIRD_PARTY_NOTICES_ALL.md`
-- Full app third-party licenses (full text per package): `licenses/APP_THIRD_PARTY_LICENSES_FULL.md`
+- Full app third-party licenses (full text per package): `licenses/THIRD_PARTY_LICENSES_ALL.md`
 - Full engine third-party licenses (full text per package/file): `licenses/ENGINE_THIRD_PARTY_LICENSES_FULL.md`
 - `Help -> Notices`
 - `Help -> App licenses`
@@ -163,8 +190,12 @@ Read these files in this repo:
 - Whisper model binaries are fetched from
   `openresearchtools/whisper-large-v3-turbo-GGML` and
   `openresearchtools/whisper-large-v3-GGML`.
-- Diarization model pack is fetched from
-  `openresearchtools/speaker-diarization-community-1-GGUF`.
+- Live transcription model binaries are fetched from
+  `openresearchtools/Voxtral-Mini-4B-Realtime-2602`.
+- Live diarization model binaries are fetched from
+  `openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf`.
+- Local chat/anonymisation GGUF models are fetched from
+  `openresearchtools/Qwen3.5-9B-GGUF`.
 - OpenResearchTools publishes converted model artifacts for runtime compatibility.
 
 Converted-model note:
