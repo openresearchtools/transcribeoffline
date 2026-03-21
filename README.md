@@ -7,9 +7,7 @@ speaker diarization, and transcript review/edit workflows.
 It is implemented as a native Rust/egui GUI on top of
 [`Openresearchtools-Engine`](https://github.com/openresearchtools/engine).
 
-![Now Available](https://img.shields.io/badge/NOW_AVAILABLE-Realtime_Live_Transcription-ff6b35?style=for-the-badge)
-![Live Diarization](https://img.shields.io/badge/Realtime_Live_Speaker_Diarization-Sortformer-0ea5e9?style=for-the-badge)
-![Acceleration](https://img.shields.io/badge/CUDA%20%7C%20Vulkan%20%7C%20Metal-Accelerated-16a34a?style=for-the-badge)
+
 
 ## NOW AVAILABLE! Realtime Live Transcription + Live Speaker Diarization
 
