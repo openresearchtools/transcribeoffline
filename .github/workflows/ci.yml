@@ -107,6 +107,32 @@ jobs:
           }
           Write-Host "Bundled license documents are present."
 
+      - name: Verify bundled notices content
+        shell: pwsh
+        run: |
+          $notices = Get-Content -LiteralPath "licenses/THIRD_PARTY_NOTICES_ALL.md" -Raw
+          $required = @(
+            "Voxtral-Mini-4B-Realtime-2602",
+            "diar_streaming_sortformer_4spk-v2.1",
+            "Qwen3.5-9B-GGUF"
+          )
+          foreach ($needle in $required) {
+            if (-not $notices.Contains($needle)) {
+              throw "Bundled notices missing required current model reference: $needle"
+            }
+          }
+          $forbidden = @(
+            "speaker-diarization-community-1",
+            "Wespeaker",
+            "pyannote/speaker-diarization-community-1"
+          )
+          foreach ($needle in $forbidden) {
+            if ($notices.Contains($needle)) {
+              throw "Bundled notices still contain stale model reference: $needle"
+            }
+          }
+          Write-Host "Bundled notices content matches current model stack."
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -181,6 +207,32 @@ jobs:
             }
           }
           Write-Host "Bundled license documents are present."
+
+      - name: Verify bundled notices content
+        shell: pwsh
+        run: |
+          $notices = Get-Content -LiteralPath "licenses/THIRD_PARTY_NOTICES_ALL.md" -Raw
+          $required = @(
+            "Voxtral-Mini-4B-Realtime-2602",
+            "diar_streaming_sortformer_4spk-v2.1",
+            "Qwen3.5-9B-GGUF"
+          )
+          foreach ($needle in $required) {
+            if (-not $notices.Contains($needle)) {
+              throw "Bundled notices missing required current model reference: $needle"
+            }
+          }
+          $forbidden = @(
+            "speaker-diarization-community-1",
+            "Wespeaker",
+            "pyannote/speaker-diarization-community-1"
+          )
+          foreach ($needle in $forbidden) {
+            if ($notices.Contains($needle)) {
+              throw "Bundled notices still contain stale model reference: $needle"
+            }
+          }
+          Write-Host "Bundled notices content matches current model stack."
 
       - name: Package (Ubuntu)
         shell: bash

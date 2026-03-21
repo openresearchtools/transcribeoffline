@@ -1,4 +1,4 @@
-﻿# Third-Party Notices
+# Third-Party Notices
 
 ## App notices
 
@@ -27,8 +27,8 @@ Model notices and citations are listed below.
 
 # Model Notices and Citations
 
-Citations below are upstream original model/research citations.
-Non-endorsement: inclusion, conversion, or runtime use in Transcribe Offline does not imply endorsement, sponsorship, affiliation, or approval by original authors/maintainers/institutions.
+The sections below describe the current converted model repositories used by Transcribe Offline.
+Non-endorsement: inclusion, conversion, or runtime use in Transcribe Offline does not imply endorsement, sponsorship, affiliation, or approval by original authors, maintainers, or institutions.
 Runtime/framework package licenses are listed in Engine licenses.
 Converted/interoperability artifacts in this app are not official upstream model releases.
 
@@ -40,52 +40,44 @@ Converted/interoperability artifacts in this app are not official upstream model
 - Original upstream model card references:
   - https://huggingface.co/openai/whisper-large-v3-turbo
   - https://huggingface.co/openai/whisper-large-v3
-- Model card license reference at time of writing: apache-2.0.
+- Converted repository license references at time of writing:
+  - whisper-large-v3-turbo-GGML: mit
+  - whisper-large-v3-GGML: apache-2.0
 - Runtime artifact format: GGML.
 - Conversion notice: distributed artifacts are conversion/interoperability outputs and may differ from original upstream packaging.
 - Non-affiliation notice: listing or bundling does not imply affiliation with or endorsement by original authors.
 - Users are responsible for complying with upstream model terms.
 
-## Qwen 3.5 9B chat model
+## Voxtral realtime live transcription models
+
+- Download source used by app (converted artifacts): https://huggingface.co/openresearchtools/Voxtral-Mini-4B-Realtime-2602
+- Original upstream model card reference: https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602
+- Converted repository license reference at time of writing: apache-2.0.
+- Runtime artifact format: GGUF.
+- Conversion notice: distributed artifacts are GGUF conversion/interoperability outputs produced from the upstream realtime model.
+- Non-affiliation notice: listing or bundling does not imply affiliation with or endorsement by original authors.
+
+## NVIDIA Sortformer live diarization model
+
+- Download source used by app (converted artifacts): https://huggingface.co/openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf
+- Original upstream model card reference: https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1
+- Converted repository license reference at time of writing: nvidia-open-model-license.
+- Runtime artifact format: GGUF.
+- Conversion notice: distributed artifacts are GGUF conversion/interoperability outputs derived from the upstream NVIDIA model.
+- Non-affiliation notice: listing or bundling does not imply affiliation with or endorsement by original authors.
+
+## Qwen chat / transcript assistance model
 
 - Suggested download source used by app (GGUF artifacts): https://huggingface.co/openresearchtools/Qwen3.5-9B-GGUF
 - Original upstream model family reference: https://huggingface.co/Qwen/Qwen3.5-9B
+- Converted repository license reference at time of writing: apache-2.0.
 - Runtime artifact format: GGUF.
-- Recommendation notice: Transcribe Offline recommends this model as a capable small local chat model for transcript Q&A and anonymisation workflows.
-- License and usage terms: users should review the current model repository pages and their linked license/usage terms before use.
-- Non-affiliation notice: this recommendation does not imply affiliation with, endorsement by, sponsorship by, or approval from the original Qwen model authors or maintainers.
-
-## Diarization models (pyannote lineage)
-
-- Download source used by app (converted artifacts): https://huggingface.co/openresearchtools/speaker-diarization-community-1-GGUF
-- Original upstream model card reference: https://huggingface.co/pyannote/speaker-diarization-community-1
-- Model card license reference at time of writing: cc-by-4.0.
-- Runtime artifact format: GGUF.
-- Conversion notice: distributed artifacts are conversion/interoperability outputs.
+- Recommendation notice: Transcribe Offline uses this model for local chat/Q&A and transcript assistance workflows when enabled.
 - Non-affiliation notice: listing or bundling does not imply affiliation with or endorsement by original authors.
-
-## WeSpeaker embedding model
-
-- Used in diarization pipeline lineage and cited here as an original upstream model component.
-- Primary citation is listed below (Wang et al., ICASSP 2023).
-- Non-affiliation notice: listing or bundling does not imply affiliation with or endorsement by original authors.
-
-## Upstream original citations
-
-Upstream original speaker segmentation citation:
-@inproceedings{Plaquet23, title={Powerset multi-class cross entropy loss for neural speaker diarization}, year=2023, booktitle={Proc. INTERSPEECH 2023}}
-
-Upstream original speaker embedding citation:
-@inproceedings{Wang2023, title={Wespeaker: A research and production oriented speaker embedding learning toolkit}, year=2023, booktitle={ICASSP 2023}}
-
-Upstream original speaker clustering citation:
-@article{Landini2022, title={Bayesian HMM clustering of x-vector sequences (VBx) in speaker diarization}, year=2022, journal={Computer Speech & Language}}
 
 ---
 
 ## Engine notices
-
-The section below is sourced from the current Openresearchtools-Engine third-party notices file and adapted for embedding inside Transcribe Offline's combined notices document.
 
 This repository contains shipped runtime code, bundled runtime dependencies, native adaptations, and a small amount of repo-kept conversion/parity tooling.
 
@@ -104,15 +96,15 @@ from that upstream.
 
 ## Bundle-facing license files
 
-- In this app, full ENGINE third-party license text is available in the embedded `Engine licenses` document.
-- This section is based on the current `Openresearchtools-Engine/third_party/README.md` notice file.
-- In packaged ENGINE apps, that notice file is shipped as `Third-Party-Notices.md`.
+- Canonical consolidated bundle license file in the repo: `../LICENSES.md`
+- Canonical third-party notice/provenance file in the repo: `README.md`
+- Bundle-time rename for packaged apps: `README.md` is copied as `Third-Party-Notices.md`
 
-In packaged ENGINE builds, one overinclusive `LICENSES.md` plus one `Third-Party-Notices.md` are shipped at bundle root. The combined license file intentionally over-includes text so one file covers all supported bundle variants.
+Packaged applications now ship one overinclusive `LICENSES.md` plus one `Third-Party-Notices.md` at bundle root. The combined license file intentionally over-includes text so one file covers all supported bundle variants.
 
 ## First-party shipped ENGINE code
 
-Openresearchtools-Engine source in its own repository, including new native C++ and Rust modules added by that project, is covered by the ENGINE repository MIT license and by the `Openresearchtools-Engine [LICENSE]` section at the top of `Engine licenses`.
+Openresearchtools-Engine source in this repository, including new native C++ and Rust modules added by this project, is covered by the repo MIT license at `../LICENSE` and by the `Openresearchtools-Engine [LICENSE]` section at the top of `../LICENSES.md`.
 
 This includes shipped ENGINE-authored native/runtime layers such as:
 
