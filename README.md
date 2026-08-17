@@ -9,6 +9,21 @@ It is implemented as a native Rust/egui GUI on top of
 
 - Windows x64*: [**Transcribe-Offline.exe**](https://github.com/openresearchtools/transcribeoffline/releases/download/2.0/Transcribe-Offline-windows-x64.exe)
 - macOS arm64*: [**Transcribe-offline.dmg**](https://github.com/openresearchtools/transcribeoffline/releases/download/2.0/transcribe-offline-macos-arm64.dmg)
+- Linux x64: release `.deb` package (`transcribe-offline_<version>_amd64.deb`)
+
+### Linux engine packages
+
+The Linux app package uses system-installed Openresearchtools-Engine runtimes and
+depends on both APT packages:
+
+- `openresearchtools-engine` for Vulkan (`/opt/openresearchtools/engine/vulkan`)
+- `openresearchtools-engine-cuda` for CUDA (`/opt/openresearchtools/engine/cuda`)
+
+The Vulkan/CUDA selector switches directly between those locations. Linux does
+not download, unpack, unblock, or replace the engine from inside the app. Once
+the OpenResearchTools APT repository is configured, `sudo apt install
+./transcribe-offline_<version>_amd64.deb` installs the app and resolves both
+engine dependencies.
 
 ## NOW AVAILABLE! Realtime Live Transcription + Live Speaker Diarization
 
@@ -98,7 +113,8 @@ If your environment blocks unsigned binaries, the recommended path is:
 
 ## Highlights
 
-- Offline-first runtime flow with in-app runtime install/repair.
+- Offline-first runtime flow with in-app runtime install/repair on Windows/macOS
+  and APT-managed Vulkan/CUDA runtimes on Linux.
 - Native desktop orchestration of Openresearchtools-Engine (`llama-server-bridge`).
 - Single device selection model (CPU or selected GPU) for runtime execution.
 - Built-in transcript editing, playback follow, anonymisation, and export workflow.

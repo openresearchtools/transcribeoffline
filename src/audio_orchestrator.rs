@@ -261,7 +261,10 @@ mod tests {
         let markdown = orchestrator.snapshot().markdown;
         assert!(markdown.contains("### SPEAKER_00"));
         assert!(markdown.contains("Stable intro."));
-        assert!(markdown.contains("### UNASSIGNED"));
+        assert!(
+            markdown.contains("### UNASSIGNED"),
+            "snapshot markdown:\n{markdown}"
+        );
         assert!(markdown.contains("tail keeps moving forward"));
         assert!(!markdown.contains("### SPEAKER_01 [00:01.000 - 00:02.000]"));
     }

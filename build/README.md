@@ -6,7 +6,8 @@ Runtime behavior:
 - playback/transcription decode uses FFmpeg shared libraries from ENGINE runtime location
   (`<runtime_dir>/vendor/ffmpeg/*`) via in-app runtime PATH setup.
 - FFmpeg shared libraries are not bundled in this repo; they are resolved from the external runtime directory
-  (`%APPDATA%\\OpenResearchTools\\engine` by default, or configured `runtime_dir`).
+  (`%APPDATA%\\OpenResearchTools\\engine` on Windows, the app runtime on macOS, or the selected
+  APT-managed runtime under `/opt/openresearchtools/engine/` on Linux).
 
 ```bash
 cargo check --locked
@@ -38,9 +39,9 @@ Optional flags:
 - `-BundleDir "<path>"` to control output location.
 - `-TargetTriple "<target>"` to package a specific Rust target output.
 
-### macOS/Linux bundle
+### macOS bundle
 
-Create a distribution folder on macOS arm64 or Ubuntu x64:
+Create a distribution folder on macOS arm64:
 
 ```bash
 ./build/package-unix.sh --locked
@@ -56,33 +57,41 @@ macOS bundle outputs:
 
 Runtime note:
 - build bundles do **not** include engine runtime binaries.
-- runtime is installed/repaired in-app using `runtime-manifests/engine-manifest.json` per platform.
+- Windows and macOS runtime behavior remains manifest-driven.
 
-Ubuntu app-menu install from downloaded bundle:
+### Linux Debian package
+
+Build the Linux x64 application and an installable Debian package:
 
 ```bash
-cd artifacts/bundles/transcribe-offline-ubuntu-x64
-bash install-ubuntu.sh
+./build/package-linux-deb.sh
 ```
 
-This creates:
-- launcher: `~/.local/bin/transcribe-offline`
-- desktop entry: `~/.local/share/applications/transcribe-offline.desktop`
-- icon: `~/.local/share/icons/hicolor/256x256/apps/transcribe-offline.png`
+By default, Cargo outputs and the `.deb` are written outside this repository under
+`../TRANSCRIBEbuilds/linux/`. Use `--target-dir` and `--output-dir` to override them.
+
+The package:
+- is named `transcribe-offline` and installs the `transcribe-offline` launcher;
+- depends on both `openresearchtools-engine` and `openresearchtools-engine-cuda`;
+- does not bundle, download, or modify either engine runtime.
+
+On Linux, the runtime selector maps literally to:
+- Vulkan: `/opt/openresearchtools/engine/vulkan`
+- CUDA: `/opt/openresearchtools/engine/cuda`
 
 ## Runtime bootstrap
 
-`Transcribe Offline.exe` runs runtime checks on startup and in Settings > Runtime:
+Transcribe Offline runs runtime checks on startup and in Settings > Runtime:
 - runtime health,
 - minimum model presence (Whisper + diarization).
 
-If missing, it opens setup with install/repair options for:
-- Openresearchtools-Engine runtime,
+If missing, it opens setup for:
+- Openresearchtools-Engine runtime (Windows/macOS install/repair; Linux APT package check),
 - Whisper model,
 - diarization model pack,
 - optional chat model.
 
-Manifest lookup order:
+Windows/macOS manifest lookup order:
 - `./runtime-manifests/engine-manifest.json`
 - user-data cache `.../runtime-manifests/engine-manifest.json`
 - remote URLs from `./runtime-manifests/engine-manifest-sources.json`

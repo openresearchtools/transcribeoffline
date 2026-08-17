@@ -1,9 +1,20 @@
 use anyhow::{anyhow, bail, Result};
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::fs::{File, OpenOptions};
+#[cfg(target_os = "linux")]
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(target_os = "linux")]
+use serde::{Deserialize, Serialize};
 
 use crate::audio_capture_api::{AudioCaptureApi, AudioLiveConfig, AudioLivePaths};
 use crate::audio_orchestrator::DiarizedTranscriptOrchestrator;
@@ -36,6 +47,102 @@ pub(crate) struct ActiveLiveCapture {
     pub stop_requested: Arc<AtomicBool>,
 }
 
+impl Drop for ActiveLiveCapture {
+    fn drop(&mut self) {
+        self.stop_requested.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Serialize, Deserialize)]
+struct LinuxLiveHelperRequest {
+    session_id: u64,
+    settings: AppSettings,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum LinuxLiveEvent {
+    Status {
+        text: String,
+    },
+    Started {
+        session_id: u64,
+        input_device: String,
+        recording_path: PathBuf,
+        transcript_path: PathBuf,
+    },
+    TextAppend {
+        session_id: u64,
+        chunk: String,
+    },
+    TextSet {
+        session_id: u64,
+        text: String,
+    },
+    Finished {
+        session_id: u64,
+        input_device: String,
+        recording_path: PathBuf,
+        transcript_path: PathBuf,
+        transcript_text: String,
+        preview_text: String,
+    },
+    Failed {
+        session_id: u64,
+        error: String,
+    },
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn enumerate_input_device_options(_runtime_dir: &Path) -> Vec<LiveInputDeviceOption> {
+    let default_option = LiveInputDeviceOption {
+        name: String::new(),
+        label: "Default input".to_string(),
+    };
+    // CPAL 0.15's ALSA iterator opens every PCM once for playback and once for
+    // capture merely to enumerate it. That can block the GUI and produces an
+    // error for every dmix/dsnoop entry. `arecord -L` reads ALSA's capture
+    // hints without opening any device; alsa-utils is a declared Linux package
+    // dependency.
+    let Ok(output) = Command::new("arecord").arg("-L").output() else {
+        return vec![default_option];
+    };
+    if !output.status.success() {
+        return vec![default_option];
+    }
+    let mut names = parse_arecord_device_names(&String::from_utf8_lossy(&output.stdout));
+    names.sort_by_key(|name| name.to_ascii_lowercase());
+    names.dedup();
+
+    let mut out = vec![default_option];
+    for name in names {
+        if name == "null" || name == "default" {
+            continue;
+        }
+        let label = if name == "pipewire" || name == "pulse" {
+            format!("{name} (sound server)")
+        } else {
+            name.clone()
+        };
+        out.push(LiveInputDeviceOption { name, label });
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn parse_arecord_device_names(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with(char::is_whitespace))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn enumerate_input_device_options(runtime_dir: &Path) -> Vec<LiveInputDeviceOption> {
     let default_option = LiveInputDeviceOption {
         name: String::new(),
@@ -86,11 +193,175 @@ pub(crate) fn resolve_input_device_index(
         .unwrap_or(0)
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn start_live_capture(
+    paths: &AppPaths,
+    settings: &AppSettings,
+    _runtime_state: Arc<Mutex<RuntimeState>>,
+    tx: mpsc::Sender<UiMessage>,
+) -> Result<ActiveLiveCapture> {
+    let live_model_path = PathBuf::from(settings.live_transcription_model.trim());
+    if !live_model_path.is_file() {
+        bail!(
+            "live transcription model not found: '{}'",
+            live_model_path.display()
+        );
+    }
+    if settings.live_diarization_enabled {
+        let _ = diarization_model_path(paths, settings)?;
+    }
+
+    let session_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+    let session_name = format!("live-session-{session_id}");
+    let output_dir = crate::settings::resolve_live_sessions_output_dir(
+        &settings.live_sessions_output_dir,
+        paths,
+    );
+    fs::create_dir_all(&output_dir).map_err(|error| {
+        anyhow!(
+            "failed to create live sessions output directory '{}': {error}",
+            output_dir.display()
+        )
+    })?;
+    let recording_path = output_dir.join(format!("{session_name}.clean.wav"));
+    let transcript_path = output_dir.join(if settings.live_diarization_enabled {
+        format!("{session_name}.transcript.md")
+    } else {
+        format!("{session_name}.transcript.txt")
+    });
+    let input_label = if settings.live_input_device.trim().is_empty() {
+        "Default input".to_string()
+    } else {
+        settings.live_input_device.trim().to_string()
+    };
+
+    let ipc_dir = create_linux_live_ipc_dir(session_id)?;
+    let request_path = ipc_dir.join("request.json");
+    let events_path = ipc_dir.join("events.jsonl");
+    let stop_path = ipc_dir.join("stop");
+    let log_path = ipc_dir.join("engine-helper.log");
+    let request = LinuxLiveHelperRequest {
+        session_id,
+        settings: settings.clone(),
+    };
+    fs::write(&request_path, serde_json::to_vec(&request)?)?;
+    fs::write(&events_path, b"")?;
+    let log_file = File::create(&log_path)?;
+    let helper_exe = std::env::current_exe()
+        .map_err(|error| anyhow!("failed to locate Transcribe Offline executable: {error}"))?;
+    let mut command = Command::new(&helper_exe);
+    command
+        .arg("--linux-engine-live-helper")
+        .arg(&request_path)
+        .arg(&events_path)
+        .arg(&stop_path)
+        .stdout(Stdio::from(log_file.try_clone()?))
+        .stderr(Stdio::from(log_file));
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&ipc_dir);
+            return Err(anyhow!(
+                "failed to launch isolated Linux Engine live helper '{}': {error}",
+                helper_exe.display()
+            ));
+        }
+    };
+
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let monitor_stop_requested = stop_requested.clone();
+    std::thread::spawn(move || {
+        let mut event_offset = 0u64;
+        let mut stop_sent = false;
+        let mut terminal_event_seen = false;
+        loop {
+            if monitor_stop_requested.load(Ordering::Relaxed) && !stop_sent {
+                if let Err(error) = fs::write(&stop_path, b"stop\n") {
+                    let _ = tx.send(UiMessage::Status(format!(
+                        "Failed to signal live Engine helper to stop: {error}"
+                    )));
+                }
+                stop_sent = true;
+            }
+
+            match forward_new_linux_live_events(&events_path, &mut event_offset, &tx) {
+                Ok(saw_terminal) => terminal_event_seen |= saw_terminal,
+                Err(error) => {
+                    let _ = tx.send(UiMessage::Status(format!(
+                        "Failed to read live Engine helper events: {error}"
+                    )));
+                }
+            }
+            if terminal_event_seen {
+                let _ = child.wait();
+                break;
+            }
+
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if let Ok(saw_terminal) =
+                        forward_new_linux_live_events(&events_path, &mut event_offset, &tx)
+                    {
+                        terminal_event_seen |= saw_terminal;
+                    }
+                    if !terminal_event_seen {
+                        let log = fs::read(&log_path)
+                            .map(|bytes| output_tail_for_live_helper(&bytes))
+                            .unwrap_or_default();
+                        let detail = if log.is_empty() {
+                            format!("live Engine helper exited with {status}")
+                        } else {
+                            format!("live Engine helper exited with {status}: {log}")
+                        };
+                        let _ = tx.send(UiMessage::LiveSessionFailed {
+                            session_id,
+                            error: detail,
+                        });
+                    }
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = tx.send(UiMessage::LiveSessionFailed {
+                        session_id,
+                        error: format!("failed to monitor live Engine helper: {error}"),
+                    });
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = fs::remove_dir_all(&ipc_dir);
+    });
+
+    Ok(ActiveLiveCapture {
+        session_id,
+        recording_path,
+        transcript_path,
+        input_label,
+        stop_requested,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn start_live_capture(
     paths: &AppPaths,
     settings: &AppSettings,
     runtime_state: Arc<Mutex<RuntimeState>>,
     tx: mpsc::Sender<UiMessage>,
+) -> Result<ActiveLiveCapture> {
+    start_live_capture_in_process(paths, settings, runtime_state, tx, None)
+}
+
+fn start_live_capture_in_process(
+    paths: &AppPaths,
+    settings: &AppSettings,
+    runtime_state: Arc<Mutex<RuntimeState>>,
+    tx: mpsc::Sender<UiMessage>,
+    requested_session_id: Option<u64>,
 ) -> Result<ActiveLiveCapture> {
     let runtime_dir = PathBuf::from(settings.runtime_dir.trim());
     let bridge_api = BridgeApi::load(&runtime_dir)?;
@@ -121,10 +392,12 @@ pub(crate) fn start_live_capture(
         None
     };
 
-    let session_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as u64;
+    let session_id = requested_session_id.unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64
+    });
     let session_name = format!("live-session-{session_id}");
     let recording_path = output_dir.join(format!("{session_name}.clean.wav"));
     let transcript_path = output_dir.join(if settings.live_diarization_enabled {
@@ -191,6 +464,272 @@ pub(crate) fn start_live_capture(
         input_label,
         stop_requested,
     })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn maybe_run_linux_live_helper(args: &[String]) -> Option<i32> {
+    if args.get(1).map(String::as_str) != Some("--linux-engine-live-helper") {
+        return None;
+    }
+    let request_path = args.get(2).map(PathBuf::from);
+    let events_path = args.get(3).map(PathBuf::from);
+    let stop_path = args.get(4).map(PathBuf::from);
+    let result = match (request_path, events_path.as_ref(), stop_path) {
+        (Some(request_path), Some(events_path), Some(stop_path)) => {
+            run_linux_live_helper(&request_path, events_path, &stop_path)
+        }
+        _ => Err(anyhow!(
+            "live helper requires request, events, and stop paths"
+        )),
+    };
+    match result {
+        Ok(()) => Some(0),
+        Err(error) => {
+            if let Some(events_path) = events_path {
+                let session_id = args
+                    .get(2)
+                    .and_then(|path| fs::read(path).ok())
+                    .and_then(|raw| serde_json::from_slice::<LinuxLiveHelperRequest>(&raw).ok())
+                    .map(|request| request.session_id)
+                    .unwrap_or(0);
+                let _ = append_linux_live_event(
+                    &events_path,
+                    &LinuxLiveEvent::Failed {
+                        session_id,
+                        error: error.to_string(),
+                    },
+                );
+            }
+            eprintln!("Linux Engine live helper failed: {error}");
+            Some(1)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_live_helper(
+    request_path: &Path,
+    events_path: &Path,
+    stop_path: &Path,
+) -> Result<()> {
+    let request: LinuxLiveHelperRequest = serde_json::from_slice(
+        &fs::read(request_path)
+            .map_err(|error| anyhow!("failed to read live helper request: {error}"))?,
+    )
+    .map_err(|error| anyhow!("failed to parse live helper request: {error}"))?;
+    let paths = crate::settings::app_paths()?;
+    crate::settings::ensure_dirs(&paths)?;
+    let (tx, rx) = mpsc::channel();
+    let runtime_state = Arc::new(Mutex::new(RuntimeState::default()));
+    let capture = start_live_capture_in_process(
+        &paths,
+        &request.settings,
+        runtime_state,
+        tx,
+        Some(request.session_id),
+    )?;
+    let mut stop_forwarded = false;
+
+    loop {
+        if stop_path.exists() && !stop_forwarded {
+            capture.stop_requested.store(true, Ordering::Relaxed);
+            stop_forwarded = true;
+        }
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(message) => {
+                if let Some((event, terminal)) = linux_live_event_from_ui_message(message) {
+                    append_linux_live_event(events_path, &event)?;
+                    if terminal {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("live Engine helper event channel disconnected unexpectedly");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_live_event_from_ui_message(message: UiMessage) -> Option<(LinuxLiveEvent, bool)> {
+    match message {
+        UiMessage::Status(text) | UiMessage::Log(text) => {
+            Some((LinuxLiveEvent::Status { text }, false))
+        }
+        UiMessage::LiveSessionStarted {
+            session_id,
+            input_device,
+            recording_path,
+            transcript_path,
+        } => Some((
+            LinuxLiveEvent::Started {
+                session_id,
+                input_device,
+                recording_path,
+                transcript_path,
+            },
+            false,
+        )),
+        UiMessage::LiveTextAppend { session_id, chunk } => Some((
+            LinuxLiveEvent::TextAppend { session_id, chunk },
+            false,
+        )),
+        UiMessage::LiveTextSet { session_id, text } => {
+            Some((LinuxLiveEvent::TextSet { session_id, text }, false))
+        }
+        UiMessage::LiveSessionFinished {
+            session_id,
+            input_device,
+            recording_path,
+            transcript_path,
+            transcript_text,
+            preview_text,
+        } => Some((
+            LinuxLiveEvent::Finished {
+                session_id,
+                input_device,
+                recording_path,
+                transcript_path,
+                transcript_text,
+                preview_text,
+            },
+            true,
+        )),
+        UiMessage::LiveSessionFailed { session_id, error } => {
+            Some((LinuxLiveEvent::Failed { session_id, error }, true))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn append_linux_live_event(path: &Path, event: &LinuxLiveEvent) -> Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(&mut file, event)?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn forward_new_linux_live_events(
+    path: &Path,
+    offset: &mut u64,
+    tx: &mpsc::Sender<UiMessage>,
+) -> Result<bool> {
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    file.seek(SeekFrom::Start(*offset))?;
+    let mut reader = BufReader::new(file);
+    let mut terminal = false;
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader.read_line(&mut line)?;
+        if bytes_read == 0 {
+            break;
+        }
+        if !line.ends_with('\n') {
+            break;
+        }
+        *offset += bytes_read as u64;
+        let event: LinuxLiveEvent = serde_json::from_str(line.trim_end())?;
+        terminal |= forward_linux_live_event(event, tx);
+    }
+    Ok(terminal)
+}
+
+#[cfg(target_os = "linux")]
+fn forward_linux_live_event(
+    event: LinuxLiveEvent,
+    tx: &mpsc::Sender<UiMessage>,
+) -> bool {
+    let (message, terminal) = match event {
+        LinuxLiveEvent::Status { text } => (UiMessage::Status(text), false),
+        LinuxLiveEvent::Started {
+            session_id,
+            input_device,
+            recording_path,
+            transcript_path,
+        } => (
+            UiMessage::LiveSessionStarted {
+                session_id,
+                input_device,
+                recording_path,
+                transcript_path,
+            },
+            false,
+        ),
+        LinuxLiveEvent::TextAppend { session_id, chunk } => {
+            (UiMessage::LiveTextAppend { session_id, chunk }, false)
+        }
+        LinuxLiveEvent::TextSet { session_id, text } => {
+            (UiMessage::LiveTextSet { session_id, text }, false)
+        }
+        LinuxLiveEvent::Finished {
+            session_id,
+            input_device,
+            recording_path,
+            transcript_path,
+            transcript_text,
+            preview_text,
+        } => (
+            UiMessage::LiveSessionFinished {
+                session_id,
+                input_device,
+                recording_path,
+                transcript_path,
+                transcript_text,
+                preview_text,
+            },
+            true,
+        ),
+        LinuxLiveEvent::Failed { session_id, error } => {
+            (UiMessage::LiveSessionFailed { session_id, error }, true)
+        }
+    };
+    let _ = tx.send(message);
+    terminal
+}
+
+#[cfg(target_os = "linux")]
+fn create_linux_live_ipc_dir(session_id: u64) -> Result<PathBuf> {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(std::env::temp_dir);
+    for attempt in 0..100u32 {
+        let path = base.join(format!(
+            "transcribe-offline-live-{}-{session_id}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(anyhow!(
+                    "failed to create live helper IPC directory '{}': {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    bail!("failed to allocate unique live helper IPC directory")
+}
+
+#[cfg(target_os = "linux")]
+fn output_tail_for_live_helper(raw: &[u8]) -> String {
+    const MAX_CHARS: usize = 2_000;
+    let text = String::from_utf8_lossy(raw);
+    let char_count = text.chars().count();
+    if char_count <= MAX_CHARS {
+        return text.trim().to_string();
+    }
+    text.chars()
+        .skip(char_count - MAX_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 fn live_worker(
@@ -585,4 +1124,18 @@ fn append_live_preview(target: &mut String, chunk: &str) {
         target.push(' ');
     }
     target.push_str(chunk);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_device_tests {
+    use super::parse_arecord_device_names;
+
+    #[test]
+    fn parses_capture_hints_without_treating_descriptions_as_devices() {
+        let output = "pipewire\n    PipeWire Sound Server\ndefault\n    Default ALSA Output\nhw:CARD=sofhdadsp,DEV=0\n    Direct hardware device\n";
+        assert_eq!(
+            parse_arecord_device_names(output),
+            vec!["pipewire", "default", "hw:CARD=sofhdadsp,DEV=0"]
+        );
+    }
 }

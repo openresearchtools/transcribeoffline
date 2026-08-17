@@ -10,6 +10,7 @@ directories = "6.0"
 libloading = "0.8"
 open = "5.3"
 rfd = { version = "0.15", default-features = false, features = ["common-controls-v6", "xdg-portal", "async-std"] }
+pollster = "0.4"
 eframe = { version = "0.33.3", default-features = true }
 regex = "1.12"
 strsim = "0.11"

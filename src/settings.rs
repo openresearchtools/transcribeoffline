@@ -160,6 +160,12 @@ pub fn legacy_shared_runtime_dir() -> PathBuf {
 }
 
 pub fn default_runtime_dir() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        return PathBuf::from(crate::runtime_installer::LINUX_VULKAN_RUNTIME_DIR);
+    }
+
+    #[cfg(not(target_os = "linux"))]
     app_root_dir().join("Engine")
 }
 
@@ -268,17 +274,26 @@ mod tests {
     #[test]
     fn default_paths_use_transcribeoffline_app_scope() {
         let runtime_dir = default_runtime_dir();
+        #[cfg(target_os = "linux")]
         assert_eq!(
-            runtime_dir.file_name().and_then(|value| value.to_str()),
-            Some("Engine")
+            runtime_dir,
+            std::path::PathBuf::from(crate::runtime_installer::LINUX_VULKAN_RUNTIME_DIR)
         );
-        assert_eq!(
-            runtime_dir
-                .parent()
-                .and_then(|value| value.file_name())
-                .and_then(|value| value.to_str()),
-            Some("TranscribeOffline")
-        );
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(
+                runtime_dir.file_name().and_then(|value| value.to_str()),
+                Some("Engine")
+            );
+            assert_eq!(
+                runtime_dir
+                    .parent()
+                    .and_then(|value| value.file_name())
+                    .and_then(|value| value.to_str()),
+                Some("TranscribeOffline")
+            );
+        }
 
         let live_sessions_dir = default_live_sessions_dir();
         assert_eq!(

@@ -1044,7 +1044,10 @@ fn repair_live_last_finished_boundary(turns: &mut Vec<SpeakerTurn>) {
     let boundary_index = turns.len() - 2;
     let left = turns[boundary_index].clone();
     let right = turns[boundary_index + 1].clone();
-    if left.speaker == right.speaker {
+    if left.speaker == right.speaker
+        || left.speaker == "UNASSIGNED"
+        || right.speaker == "UNASSIGNED"
+    {
         return;
     }
 
@@ -1196,6 +1199,13 @@ fn collapse_unassigned_tail_turn(pieces: &[AssignedPiece]) -> Option<SpeakerTurn
 }
 
 fn tail_should_follow_previous_speaker(previous_turn: &SpeakerTurn, tail_turn: &SpeakerTurn) -> bool {
+    // A live tail without sentence-ending punctuation is still provisional.
+    // Keep it unassigned until diarization catches up; the final-snapshot path
+    // assigns any remaining tail explicitly once the stream is complete.
+    if !ends_sentence(&tail_turn.text) {
+        return false;
+    }
+
     let tail_word_count = speaker_turn_word_count(tail_turn);
     let tail_duration_samples = tail_turn.end_sample.saturating_sub(tail_turn.start_sample);
 
@@ -1723,7 +1733,7 @@ mod tests {
 
         let turns =
             assemble_live_turns_with_words(&spans, &pieces, &[], &AssembleOptions::default());
-        assert_eq!(turns.len(), 3);
+        assert_eq!(turns.len(), 3, "turns: {turns:#?}");
         assert_eq!(turns[0].speaker, "SPEAKER_00");
         assert_eq!(turns[0].text, "Stop spending so much money on me.");
         assert_eq!(turns[1].speaker, "SPEAKER_01");

@@ -5,18 +5,26 @@ mod audio_capture_api;
 mod audio_orchestrator;
 mod bridge;
 mod live;
+#[cfg(target_os = "linux")]
+mod linux_playback;
 mod runtime_installer;
 mod settings;
 
 use anyhow::{anyhow, bail, Context, Result};
+#[cfg(not(target_os = "linux"))]
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     SampleFormat, Stream, StreamConfig,
 };
 use eframe::{egui, App, Frame, NativeOptions};
 use regex::Regex;
+#[cfg(target_os = "linux")]
+use rfd::AsyncFileDialog;
+#[cfg(not(target_os = "linux"))]
 use rfd::FileDialog;
-use serde_json::{json, Value};
+#[cfg(not(target_os = "linux"))]
+use serde_json::json;
+use serde_json::Value;
 use settings::{
     app_paths, default_diarization_models_dir, default_live_transcription_model_path,
     default_whisper_model_path, ensure_dirs, load_settings, save_model_links, save_settings,
@@ -29,12 +37,14 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bridge::{
-    AudioRunParams, BridgeApi, ChatRunParams, SharedBridgeParams, REASONING_BUDGET_UNSET,
-};
+#[cfg(not(target_os = "linux"))]
+use bridge::{AudioRunParams, ChatRunParams, REASONING_BUDGET_UNSET};
+use bridge::{BridgeApi, SharedBridgeParams};
 use live::{
     enumerate_input_device_options, resolve_input_device_index, ActiveLiveCapture,
     LiveInputDeviceOption,
@@ -385,6 +395,23 @@ fn runtime_missing_messages(runtime_dir: &Path) -> Vec<String> {
             runtime_dir.display()
         ));
         return missing;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let descriptor = runtime_dir.join("engine-runtime.json");
+        if !descriptor.is_file() || fs::File::open(&descriptor).is_err() {
+            missing
+                .push("Missing or unreadable engine-runtime.json package descriptor".to_string());
+        }
+
+        let cli = runtime_dir.join("example-cli");
+        let cli_executable = fs::metadata(&cli)
+            .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+        if !cli_executable {
+            missing.push("Missing or non-executable example-cli".to_string());
+        }
     }
 
     let bridge = runtime_dir.join(bridge_library_file_name());
@@ -865,11 +892,19 @@ enum UiMessage {
         source_text: String,
     },
     AnonymiseFailed(String),
+    #[cfg(target_os = "linux")]
+    LinuxDeviceProbeDone {
+        runtime_dir: PathBuf,
+        audio_devices: Vec<AudioDeviceOption>,
+        live_input_devices: Vec<LiveInputDeviceOption>,
+    },
+    #[cfg(not(target_os = "linux"))]
     PlaybackDecoded {
         audio_path: PathBuf,
         start_sec: f64,
         data: Vec<f32>,
     },
+    #[cfg(not(target_os = "linux"))]
     PlaybackDecodeFailed {
         audio_path: PathBuf,
         error: String,
@@ -905,6 +940,14 @@ enum UiMessage {
         session_id: u64,
         error: String,
     },
+}
+
+#[cfg(target_os = "linux")]
+enum LinuxDialogResult {
+    Media(Result<Option<Vec<PathBuf>>, String>),
+    Outputs(Result<Option<Vec<PathBuf>>, String>),
+    ChatModel(Result<Option<PathBuf>, String>),
+    LiveSessionsFolder(Result<Option<PathBuf>, String>),
 }
 
 #[derive(Clone)]
@@ -953,6 +996,7 @@ impl LegalDocKind {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 #[derive(Default)]
 struct PlaybackBuffer {
     samples_stereo_f32: Vec<f32>,
@@ -964,6 +1008,7 @@ struct PlaybackBuffer {
     source_path: Option<PathBuf>,
 }
 
+#[cfg(not(target_os = "linux"))]
 struct PlaybackState {
     stream: Option<Stream>,
     stream_config: Option<StreamConfig>,
@@ -977,6 +1022,7 @@ struct PlaybackState {
     seek_repeat_count: u32,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl Default for PlaybackState {
     fn default() -> Self {
         Self {
@@ -994,11 +1040,22 @@ impl Default for PlaybackState {
     }
 }
 
+#[cfg(target_os = "linux")]
+type PlaybackState = linux_playback::PlaybackController;
+
 struct UiApp {
     paths: AppPaths,
     settings: AppSettings,
     tx: mpsc::Sender<UiMessage>,
     rx: mpsc::Receiver<UiMessage>,
+    #[cfg(target_os = "linux")]
+    dialog_tx: mpsc::SyncSender<LinuxDialogResult>,
+    #[cfg(target_os = "linux")]
+    dialog_rx: mpsc::Receiver<LinuxDialogResult>,
+    #[cfg(target_os = "linux")]
+    dialog_busy: bool,
+    #[cfg(target_os = "linux")]
+    dialog_base: AsyncFileDialog,
     runtime_state: Arc<Mutex<RuntimeState>>,
 
     tab: usize,
@@ -1060,7 +1117,9 @@ struct UiApp {
     playback_decode_in_progress: bool,
     playback_decode_autoplay: bool,
     playback_pending_start: Option<(PathBuf, f64)>,
+    playback_predecode_attempted_path: Option<PathBuf>,
     playback_follow_pause_until: Option<Instant>,
+    playback_follow_enabled: bool,
     playback_click_sync_target: Option<(f64, Instant)>,
     manual_edit_scroll_sync_y: Option<f32>,
     speaker_rename_entries: Vec<SpeakerRenameEntry>,
@@ -1087,7 +1146,7 @@ impl UiApp {
         }
     }
 
-    fn new(paths: AppPaths) -> Self {
+    fn new(paths: AppPaths, creation_context: &eframe::CreationContext<'_>) -> Self {
         let mut settings = match load_settings(&paths) {
             Ok(s) => s,
             Err(_) => AppSettings::default(),
@@ -1114,6 +1173,15 @@ impl UiApp {
         if !matches!(mode_norm.as_str(), "transcript" | "speech" | "subtitle") {
             settings.mode = "transcript".to_string();
         }
+        #[cfg(target_os = "linux")]
+        {
+            settings.runtime_dir = runtime_installer::linux_system_runtime_dir_for_backend(
+                &settings.runtime_download_backend,
+            )
+            .unwrap_or_else(|_| PathBuf::from(runtime_installer::LINUX_VULKAN_RUNTIME_DIR))
+            .display()
+            .to_string();
+        }
         let runtime_dir = resolve_runtime_dir(Path::new(settings.runtime_dir.trim()));
         settings.runtime_dir =
             settings::normalize_runtime_dir_alias(&runtime_dir.display().to_string());
@@ -1131,7 +1199,11 @@ impl UiApp {
                 .is_empty();
         let runtime_missing_window = !runtime_missing.is_empty() || setup_issues_present;
         let initial_status = if !runtime_missing.is_empty() {
-            "Runtime missing or incomplete. Install/Repair runtime.".to_string()
+            if cfg!(target_os = "linux") {
+                "APT-managed engine runtime missing or incomplete.".to_string()
+            } else {
+                "Runtime missing or incomplete. Install/Repair runtime.".to_string()
+            }
         } else if setup_issues_present {
             "Setup incomplete. Download required Whisper/Sortformer models.".to_string()
         } else {
@@ -1139,7 +1211,14 @@ impl UiApp {
         };
 
         let (tx, rx) = mpsc::channel();
+        #[cfg(target_os = "linux")]
+        let (dialog_tx, dialog_rx) = mpsc::sync_channel(8);
+        #[cfg(target_os = "linux")]
+        let dialog_base = AsyncFileDialog::new().set_parent(creation_context);
         let runtime_state = Arc::new(Mutex::new(RuntimeState::default()));
+        #[cfg(target_os = "linux")]
+        let audio_devices = pending_audio_device_options();
+        #[cfg(not(target_os = "linux"))]
         let audio_devices = enumerate_audio_device_options(&runtime_dir);
         let selected_audio_device = resolve_audio_device_index(&audio_devices, &settings);
         let mut runtime_install_backends = runtime_backend_options(&paths);
@@ -1169,16 +1248,24 @@ impl UiApp {
             })
             .unwrap_or(false)
             || runtime_backend_detected;
-        let auto_device_applied = should_auto_select_gpu_from_settings(&settings)
-            && apply_audio_device_to_settings_from_index(
-                &mut settings,
-                &audio_devices,
-                selected_audio_device,
-            );
+        #[cfg(not(target_os = "linux"))]
+        let audio_device_normalized = normalize_audio_device_settings(
+            &mut settings,
+            &audio_devices,
+            selected_audio_device,
+        );
+        #[cfg(target_os = "linux")]
+        let audio_device_normalized = false;
 
         let whisper_models = select_whisper_model_index(&settings.whisper_model);
         let live_models = select_live_model_index(&settings.live_transcription_model);
         let chat_models = select_chat_model_index(&settings.chat_model);
+        #[cfg(target_os = "linux")]
+        let live_input_devices = vec![LiveInputDeviceOption {
+            name: String::new(),
+            label: "Default input (probing devices...)".to_string(),
+        }];
+        #[cfg(not(target_os = "linux"))]
         let live_input_devices = enumerate_input_device_options(&runtime_dir);
         let selected_live_input_device =
             resolve_input_device_index(&live_input_devices, &settings.live_input_device);
@@ -1188,6 +1275,14 @@ impl UiApp {
             settings,
             tx,
             rx,
+            #[cfg(target_os = "linux")]
+            dialog_tx,
+            #[cfg(target_os = "linux")]
+            dialog_rx,
+            #[cfg(target_os = "linux")]
+            dialog_busy: false,
+            #[cfg(target_os = "linux")]
+            dialog_base,
             runtime_state,
             tab: 0,
             status: initial_status.clone(),
@@ -1250,7 +1345,9 @@ impl UiApp {
             playback_decode_in_progress: false,
             playback_decode_autoplay: false,
             playback_pending_start: None,
+            playback_predecode_attempted_path: None,
             playback_follow_pause_until: None,
+            playback_follow_enabled: true,
             playback_click_sync_target: None,
             manual_edit_scroll_sync_y: None,
             speaker_rename_entries: Vec::new(),
@@ -1262,13 +1359,16 @@ impl UiApp {
             live_input_label: String::new(),
             playback: PlaybackState::default(),
             fonts_configured: false,
-            settings_dirty: auto_device_applied || runtime_backend_synced,
+            settings_dirty: audio_device_normalized || runtime_backend_synced,
             next_save: Instant::now(),
         };
 
-        if auto_device_applied {
-            app.push_log_only("Auto-selected macOS Metal GPU for runtime.");
+        if audio_device_normalized {
+            app.push_log_only("Normalized execution device for the selected Engine runtime.");
         }
+
+        #[cfg(target_os = "linux")]
+        app.queue_linux_device_probe(runtime_dir);
 
         app
     }
@@ -1396,8 +1496,52 @@ impl UiApp {
         ) {
             self.queue_save();
         }
+        #[cfg(target_os = "linux")]
+        self.queue_linux_device_probe(runtime_dir.clone());
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.audio_devices = enumerate_audio_device_options(&runtime_dir);
+            self.selected_audio_device =
+                resolve_audio_device_index(&self.audio_devices, &self.settings);
+            if normalize_audio_device_settings(
+                &mut self.settings,
+                &self.audio_devices,
+                self.selected_audio_device,
+            ) {
+                self.queue_save();
+            }
+            self.live_input_devices = enumerate_input_device_options(&runtime_dir);
+            self.selected_live_input_device = resolve_input_device_index(
+                &self.live_input_devices,
+                &self.settings.live_input_device,
+            );
+        }
         self.show_runtime_missing_window =
             !self.runtime_missing.is_empty() || !self.runtime_setup_issues().is_empty();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn queue_linux_device_probe(&mut self, runtime_dir: PathBuf) {
+        self.audio_devices = pending_audio_device_options();
+        self.live_input_devices = vec![LiveInputDeviceOption {
+            name: String::new(),
+            label: "Default input (probing devices...)".to_string(),
+        }];
+        self.selected_audio_device = 0;
+        self.selected_live_input_device = 0;
+        let tx = self.tx.clone();
+        std::thread::Builder::new()
+            .name("linux-device-probe".to_string())
+            .spawn(move || {
+                let audio_devices = enumerate_audio_device_options(&runtime_dir);
+                let live_input_devices = enumerate_input_device_options(&runtime_dir);
+                let _ = tx.send(UiMessage::LinuxDeviceProbeDone {
+                    runtime_dir,
+                    audio_devices,
+                    live_input_devices,
+                });
+            })
+            .expect("failed to create Linux device probe thread");
     }
 
     fn sync_runtime_missing_popup_session(&mut self) {
@@ -1416,6 +1560,109 @@ impl UiApp {
         self.runtime_install_in_progress || self.runtime_unblock_in_progress
     }
 
+    #[cfg(target_os = "linux")]
+    fn ui_runtime_management_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        _runtime_dir: &Path,
+        auto_close_on_runtime_ready: bool,
+    ) -> bool {
+        let runtime_is_missing = !self.runtime_missing.is_empty();
+        if runtime_is_missing {
+            ui.colored_label(
+                egui::Color32::RED,
+                "The selected APT-managed engine runtime is missing or incomplete.",
+            );
+        } else {
+            ui.colored_label(
+                egui::Color32::from_rgb(0x2E, 0x7D, 0x32),
+                "Selected APT-managed engine runtime appears complete.",
+            );
+        }
+        ui.label("Linux engine runtimes are installed and updated by APT; this app never downloads or modifies them.");
+        ui.label("Required packages: openresearchtools-engine and openresearchtools-engine-cuda");
+
+        let selected_text = self
+            .runtime_install_backends
+            .get(self.selected_runtime_install_backend)
+            .cloned()
+            .unwrap_or_else(|| "vulkan".to_string());
+        let mut selected_index = self
+            .selected_runtime_install_backend
+            .min(self.runtime_install_backends.len().saturating_sub(1));
+        ui.horizontal(|ui| {
+            ui.label("Linux engine backend:");
+            egui::ComboBox::from_id_salt("runtime_backend_linux_combo")
+                .selected_text(selected_text.to_ascii_uppercase())
+                .show_ui(ui, |ui| {
+                    for (idx, backend) in self.runtime_install_backends.iter().enumerate() {
+                        ui.selectable_value(&mut selected_index, idx, backend.to_ascii_uppercase());
+                    }
+                });
+        });
+
+        if selected_index != self.selected_runtime_install_backend {
+            self.selected_runtime_install_backend = selected_index;
+            if let Some(backend) = self
+                .runtime_install_backends
+                .get(self.selected_runtime_install_backend)
+                .cloned()
+            {
+                self.settings.runtime_download_backend = backend.clone();
+                if let Ok(selected_dir) =
+                    runtime_installer::linux_system_runtime_dir_for_backend(&backend)
+                {
+                    self.settings.runtime_dir = selected_dir.display().to_string();
+                    configure_runtime_dll_search(&selected_dir);
+                    self.runtime_missing = runtime_missing_messages(&selected_dir);
+                    self.queue_linux_device_probe(selected_dir);
+                }
+                self.runtime_post_install_prompt = false;
+                self.queue_save();
+            }
+        }
+
+        let selected_runtime_dir = resolve_runtime_dir(Path::new(self.settings.runtime_dir.trim()));
+        ui.label(format!(
+            "Runtime directory: {}",
+            selected_runtime_dir.display()
+        ));
+        if runtime_is_missing {
+            for item in &self.runtime_missing {
+                ui.label(format!("- {item}"));
+            }
+            let package = if self
+                .settings
+                .runtime_download_backend
+                .eq_ignore_ascii_case("cuda")
+            {
+                "openresearchtools-engine-cuda"
+            } else {
+                "openresearchtools-engine"
+            };
+            ui.label(format!(
+                "Repair with APT outside the app: sudo apt install --reinstall {package}"
+            ));
+        }
+
+        let mut runtime_ready_now = false;
+        ui.horizontal(|ui| {
+            if ui.button("Open runtime folder").clicked() {
+                let _ = open::that(&selected_runtime_dir);
+            }
+            if ui.button("Recheck installed engines").clicked() {
+                self.refresh_runtime_state();
+                if self.runtime_missing.is_empty() {
+                    self.push_status("Selected APT-managed runtime detected.");
+                    runtime_ready_now = true;
+                }
+            }
+        });
+
+        runtime_ready_now && auto_close_on_runtime_ready
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn ui_runtime_management_controls(
         &mut self,
         ui: &mut egui::Ui,
@@ -2032,14 +2279,14 @@ impl UiApp {
                                 &mut self.runtime_install_backends,
                                 &mut self.selected_runtime_install_backend,
                             );
-                            if should_auto_select_gpu_from_settings(&self.settings)
-                                && apply_audio_device_to_settings_from_index(
-                                    &mut self.settings,
-                                    &self.audio_devices,
-                                    self.selected_audio_device,
-                                )
-                            {
-                                self.push_log_only("Auto-selected macOS Metal GPU for runtime.");
+                            if normalize_audio_device_settings(
+                                &mut self.settings,
+                                &self.audio_devices,
+                                self.selected_audio_device,
+                            ) {
+                                self.push_log_only(
+                                    "Normalized execution device for the selected Engine runtime.",
+                                );
                             }
                             self.queue_save();
                         }
@@ -2253,6 +2500,39 @@ impl UiApp {
                     self.push_status(&format!("Anonymise failed: {error}"));
                     self.open_modal("Anonymise failed", error, true);
                 }
+                #[cfg(target_os = "linux")]
+                UiMessage::LinuxDeviceProbeDone {
+                    runtime_dir,
+                    audio_devices,
+                    live_input_devices,
+                } => {
+                    let selected_runtime = resolve_runtime_dir(Path::new(
+                        self.settings.runtime_dir.trim(),
+                    ));
+                    if selected_runtime != runtime_dir {
+                        continue;
+                    }
+                    self.audio_devices = audio_devices;
+                    self.selected_audio_device =
+                        resolve_audio_device_index(&self.audio_devices, &self.settings);
+                    if normalize_audio_device_settings(
+                        &mut self.settings,
+                        &self.audio_devices,
+                        self.selected_audio_device,
+                    ) {
+                        self.queue_save();
+                    }
+                    self.live_input_devices = live_input_devices;
+                    self.selected_live_input_device = resolve_input_device_index(
+                        &self.live_input_devices,
+                        &self.settings.live_input_device,
+                    );
+                    self.push_log_only(&format!(
+                        "Background device probe complete for {}.",
+                        runtime_dir.display()
+                    ));
+                }
+                #[cfg(not(target_os = "linux"))]
                 UiMessage::PlaybackDecoded {
                     audio_path,
                     start_sec,
@@ -2315,6 +2595,7 @@ impl UiApp {
                         }
                     }
                 }
+                #[cfg(not(target_os = "linux"))]
                 UiMessage::PlaybackDecodeFailed { audio_path, error } => {
                     self.playback_decode_in_progress = false;
                     self.playback_decode_autoplay = false;
@@ -3033,15 +3314,46 @@ impl UiApp {
                 .unwrap_or_else(|| self.paths.data_dir.clone())
         };
 
+        #[cfg(target_os = "linux")]
+        {
+            if self.dialog_busy {
+                self.push_status("A file or folder chooser is already open.");
+                return;
+            }
+            self.dialog_busy = true;
+            self.push_status("Opening live sessions folder chooser...");
+            let tx = self.dialog_tx.clone();
+            let dialog = self.dialog_base.clone();
+            std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    pollster::block_on(
+                        dialog
+                            .set_title("Choose folder for live recordings and transcripts")
+                            .set_directory(dialog_dir)
+                            .pick_folder(),
+                    )
+                    .map(|handle| handle.path().to_path_buf())
+                }))
+                .map_err(|_| "native folder chooser crashed".to_string());
+                let _ = tx.try_send(LinuxDialogResult::LiveSessionsFolder(result));
+            });
+            return;
+        }
+
+        #[cfg(not(target_os = "linux"))]
         if let Some(path) = self.safe_dialog_call("Choose folder for live sessions", || {
             FileDialog::new()
                 .set_title("Choose folder for live recordings and transcripts")
                 .set_directory(dialog_dir)
                 .pick_folder()
         }) {
-            self.settings.live_sessions_output_dir = path.display().to_string();
-            self.queue_save();
+            self.apply_live_sessions_output_dir(path);
         }
+    }
+
+    fn apply_live_sessions_output_dir(&mut self, path: PathBuf) {
+        self.settings.live_sessions_output_dir = path.display().to_string();
+        self.queue_save();
     }
 
     fn open_live_sessions_output_dir(&mut self) {
@@ -3063,6 +3375,34 @@ impl UiApp {
 
     fn do_pick_chat_model(&mut self) {
         let models_dir = self.paths.models_dir.clone();
+        #[cfg(target_os = "linux")]
+        {
+            if self.dialog_busy {
+                self.push_status("A file or folder chooser is already open.");
+                return;
+            }
+            self.dialog_busy = true;
+            self.push_status("Opening chat model chooser...");
+            let tx = self.dialog_tx.clone();
+            let dialog = self.dialog_base.clone();
+            std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    pollster::block_on(
+                        dialog
+                            .set_title("Select chat model file")
+                            .set_directory(models_dir)
+                            .add_filter("Model", &["gguf"])
+                            .pick_file(),
+                    )
+                    .map(|handle| handle.path().to_path_buf())
+                }))
+                .map_err(|_| "native chat model chooser crashed".to_string());
+                let _ = tx.try_send(LinuxDialogResult::ChatModel(result));
+            });
+            return;
+        }
+
+        #[cfg(not(target_os = "linux"))]
         if let Some(path) = self.safe_dialog_call("Select chat model file", || {
             FileDialog::new()
                 .set_title("Select chat model file")
@@ -3070,10 +3410,14 @@ impl UiApp {
                 .add_filter("Model", &["gguf"])
                 .pick_file()
         }) {
-            self.settings.chat_model = path.display().to_string();
-            self.chat_models = select_chat_model_index(&self.settings.chat_model);
-            self.queue_save();
+            self.apply_chat_model_path(path);
         }
+    }
+
+    fn apply_chat_model_path(&mut self, path: PathBuf) {
+        self.settings.chat_model = path.display().to_string();
+        self.chat_models = select_chat_model_index(&self.settings.chat_model);
+        self.queue_save();
     }
 
     fn do_start_chat(&mut self) {
@@ -3448,64 +3792,133 @@ impl UiApp {
     }
 
     fn do_add_media_files(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            if self.dialog_busy {
+                self.push_status("A file or folder chooser is already open.");
+                return;
+            }
+            self.dialog_busy = true;
+            self.push_status("Opening media file chooser...");
+            let tx = self.dialog_tx.clone();
+            let dialog = self.dialog_base.clone();
+            std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    pollster::block_on(
+                        dialog
+                            .set_title("Select media files")
+                            .add_filter("Supported media", supported_media_extensions())
+                            .pick_files(),
+                    )
+                    .map(|handles| {
+                        handles
+                            .into_iter()
+                            .map(|handle| handle.path().to_path_buf())
+                            .collect()
+                    })
+                }))
+                .map_err(|_| "native media file chooser crashed".to_string());
+                let _ = tx.try_send(LinuxDialogResult::Media(result));
+            });
+            return;
+        }
+
+        #[cfg(not(target_os = "linux"))]
         if let Some(paths) = self.safe_dialog_call("Select media files", || {
             FileDialog::new()
                 .set_title("Select media files")
                 .add_filter("Supported media", supported_media_extensions())
                 .pick_files()
         }) {
-            let mut found_existing_outputs = false;
-            if let Ok(mut state) = self.runtime_state.lock() {
-                for path in paths {
-                    if !state.media_entries.iter().any(|e| e.path == path) {
-                        state.media_entries.push(MediaEntry {
-                            path: path.clone(),
-                            selected: true,
-                        });
-                    }
-                    let output_paths = existing_output_paths_for_media(&path);
-                    if !output_paths.is_empty() {
-                        found_existing_outputs = true;
-                    }
-                    for output_path in output_paths {
-                        ensure_output_entry(&mut state.output_entries, output_path, false);
-                    }
+            self.apply_media_paths(paths);
+        }
+    }
+
+    fn apply_media_paths(&mut self, paths: Vec<PathBuf>) {
+        let mut found_existing_outputs = false;
+        if let Ok(mut state) = self.runtime_state.lock() {
+            for path in paths {
+                if !state.media_entries.iter().any(|e| e.path == path) {
+                    state.media_entries.push(MediaEntry {
+                        path: path.clone(),
+                        selected: true,
+                    });
+                }
+                let output_paths = existing_output_paths_for_media(&path);
+                if !output_paths.is_empty() {
+                    found_existing_outputs = true;
+                }
+                for output_path in output_paths {
+                    ensure_output_entry(&mut state.output_entries, output_path, false);
                 }
             }
-            if found_existing_outputs {
-                self.push_status(
-                    "Added media files. Existing .md/.edited.md outputs were auto-added.",
-                );
-            } else {
-                self.push_status("Added media files.");
-            }
+        }
+        if found_existing_outputs {
+            self.push_status("Added media files. Existing .md/.edited.md outputs were auto-added.");
+        } else {
+            self.push_status("Added media files.");
         }
     }
 
     fn do_add_output_files(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            if self.dialog_busy {
+                self.push_status("A file or folder chooser is already open.");
+                return;
+            }
+            self.dialog_busy = true;
+            self.push_status("Opening output file chooser...");
+            let tx = self.dialog_tx.clone();
+            let dialog = self.dialog_base.clone();
+            std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    pollster::block_on(
+                        dialog
+                            .set_title("Select output/result files")
+                            .pick_files(),
+                    )
+                    .map(|handles| {
+                        handles
+                            .into_iter()
+                            .map(|handle| handle.path().to_path_buf())
+                            .collect()
+                    })
+                }))
+                .map_err(|_| "native output file chooser crashed".to_string());
+                let _ = tx.try_send(LinuxDialogResult::Outputs(result));
+            });
+            return;
+        }
+
+        #[cfg(not(target_os = "linux"))]
         if let Some(paths) = self.safe_dialog_call("Select output/result files", || {
             FileDialog::new()
                 .set_title("Select output/result files")
                 .pick_files()
         }) {
-            if let Ok(mut state) = self.runtime_state.lock() {
-                for path in paths {
-                    ensure_output_entry(&mut state.output_entries, path.clone(), false);
-                    if is_edited_output_path(&path) {
-                        let original = original_output_path_for_any(&path);
-                        if original.exists() {
-                            ensure_output_entry(&mut state.output_entries, original, false);
-                        }
-                    } else {
-                        let edited = edited_file_path(&path);
-                        if edited.exists() {
-                            ensure_output_entry(&mut state.output_entries, edited, false);
-                        }
+            self.apply_output_paths(paths);
+        }
+    }
+
+    fn apply_output_paths(&mut self, paths: Vec<PathBuf>) {
+        if let Ok(mut state) = self.runtime_state.lock() {
+            for path in paths {
+                ensure_output_entry(&mut state.output_entries, path.clone(), false);
+                if is_edited_output_path(&path) {
+                    let original = original_output_path_for_any(&path);
+                    if original.exists() {
+                        ensure_output_entry(&mut state.output_entries, original, false);
+                    }
+                } else {
+                    let edited = edited_file_path(&path);
+                    if edited.exists() {
+                        ensure_output_entry(&mut state.output_entries, edited, false);
                     }
                 }
             }
-            self.push_status("Added output files.");
         }
+        self.push_status("Added output files.");
     }
 
     fn clear_loaded_transcript(&mut self) {
@@ -4009,6 +4422,10 @@ impl UiApp {
                 playback_apply_speed(&mut self.playback);
                 self.push_status(&format!("Speed {:.2}x", speed));
             }
+            let follow_response = ui.checkbox(&mut self.playback_follow_enabled, "Follow transcript");
+            if follow_response.changed() {
+                self.playback_follow_pause_until = None;
+            }
             if self.playback_decode_in_progress {
                 ui.spinner();
                 ui.label("Decoding...");
@@ -4271,26 +4688,47 @@ impl UiApp {
     }
 
     fn playback_follow_active(&self) -> bool {
-        playback_is_playing(&self.playback) || self.playback_click_sync_target.is_some()
+        self.playback_follow_enabled
+            && (playback_is_playing(&self.playback) || self.playback_click_sync_target.is_some())
     }
 
     fn pause_follow_after_manual_scroll(&mut self) {
-        self.playback_follow_pause_until =
-            Some(Instant::now() + Duration::from_secs_f64(PLAYBACK_SCROLL_FOLLOW_PAUSE_SEC));
+        #[cfg(target_os = "linux")]
+        {
+            // Manual navigation is intentional. Do not snap back after a short
+            // timer while the user is reading or editing a long transcript.
+            self.playback_follow_enabled = false;
+            self.playback_follow_pause_until = None;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.playback_follow_pause_until =
+                Some(Instant::now() + Duration::from_secs_f64(PLAYBACK_SCROLL_FOLLOW_PAUSE_SEC));
+        }
     }
 
     fn user_scrolled_in_rect(&self, ctx: &egui::Context, inner_rect: egui::Rect) -> bool {
         ctx.input(|i| {
+            let hit_rect = inner_rect.expand2(egui::vec2(18.0, 0.0));
             let pointer_over = i
                 .pointer
                 .hover_pos()
-                .map(|pos| inner_rect.contains(pos))
+                .map(|pos| hit_rect.contains(pos))
                 .unwrap_or(false);
             if !pointer_over {
                 return false;
             }
             let delta = i.raw_scroll_delta + i.smooth_scroll_delta;
-            delta.x.abs() > f32::EPSILON || delta.y.abs() > f32::EPSILON
+            let dragging_scrollbar = i.pointer.primary_down()
+                && i.pointer.delta().y.abs() > f32::EPSILON
+                && i
+                    .pointer
+                    .hover_pos()
+                    .map(|pos| pos.x >= inner_rect.right() - 6.0)
+                    .unwrap_or(false);
+            delta.x.abs() > f32::EPSILON
+                || delta.y.abs() > f32::EPSILON
+                || dragging_scrollbar
         })
     }
 
@@ -4315,6 +4753,34 @@ impl UiApp {
         if playback_has_loaded_path(&self.playback, &path) {
             return;
         }
+        if self
+            .playback_predecode_attempted_path
+            .as_ref()
+            .map(|attempted| playback_paths_equal(attempted, &path))
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.playback_predecode_attempted_path = Some(path.clone());
+
+        #[cfg(target_os = "linux")]
+        {
+            self.playback_decode_in_progress = true;
+            self.playback_decode_autoplay = false;
+            self.playback_pending_start = None;
+            self.push_log_only(&format!(
+                "Preloading audio in isolated playback helper: {}",
+                path.display()
+            ));
+            if let Err(error) = self.playback.load(path, 0.0, false) {
+                self.playback_decode_in_progress = false;
+                self.push_status(&format!("Playback preload failed: {error}"));
+            }
+            return;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
         if playback_ensure_stream(&mut self.playback).is_err() {
             return;
         }
@@ -4345,11 +4811,40 @@ impl UiApp {
                 }
             }
         });
+        }
     }
 
     fn request_playback_start(&mut self, path: PathBuf, start_sec: f64, reason: &str) {
         let path = normalize_playback_path(&path);
         let start_sec = start_sec.max(0.0);
+
+        #[cfg(target_os = "linux")]
+        {
+            self.playback_predecode_attempted_path = Some(path.clone());
+            if playback_has_loaded_path(&self.playback, &path) {
+                match playback_start_from(&mut self.playback, &path, start_sec) {
+                    Ok(_) => self.push_status(&format!("Playback {:.2}s", start_sec)),
+                    Err(error) => {
+                        self.push_status(&format!("Playback start failed: {error}"))
+                    }
+                }
+            } else {
+                self.playback_decode_in_progress = true;
+                self.playback_decode_autoplay = true;
+                self.push_status(&format!(
+                    "Preparing audio in isolated playback helper ({reason}) at {:.2}s...",
+                    start_sec
+                ));
+                if let Err(error) = self.playback.load(path, start_sec, true) {
+                    self.playback_decode_in_progress = false;
+                    self.push_status(&format!("Playback start failed: {error}"));
+                }
+            }
+            return;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
         if playback_has_loaded_path(&self.playback, &path) {
             match playback_start_from(&mut self.playback, &path, start_sec) {
                 Ok(_) => self.push_status(&format!("Playback {:.2}s", start_sec)),
@@ -4395,6 +4890,7 @@ impl UiApp {
                 }
             }
         });
+        }
     }
 
     fn seek_to_line(&mut self, line_idx: usize) {
@@ -4403,6 +4899,7 @@ impl UiApp {
             return;
         };
         self.playback_follow_pause_until = None;
+        self.playback_follow_enabled = true;
         self.edit_pause_until = None;
         self.set_click_sync_target(target);
         if !self.ensure_runtime_ready("Playback") {
@@ -4429,6 +4926,7 @@ impl UiApp {
             return;
         };
         self.playback_follow_pause_until = None;
+        self.playback_follow_enabled = true;
         self.edit_pause_until = None;
         self.set_click_sync_target(target);
         if !self.ensure_runtime_ready("Playback") {
@@ -4934,17 +5432,16 @@ impl UiApp {
                 .map(|(start, _)| start)
                 .or(edited_current_line)
                 .or(active_anchor);
-            let transcript_lines = self
-                .transcription_text
-                .lines()
-                .map(|line| line.to_string())
-                .collect::<Vec<_>>();
+            let transcript_is_empty = self.transcription_text.trim().is_empty();
             let playback_follow_active = self.playback_follow_active();
             let follow_paused = !playback_follow_active || self.follow_paused_for_user_navigation();
             if self.editing_enabled {
                 let mut original_scroll_info = None::<(f32, bool)>;
                 let mut edited_scroll_info = None::<(f32, bool)>;
-                let manual_edit_sync_enabled = !playback_follow_active;
+                // On Linux, forcing last frame's offset back into both scroll
+                // areas made wheel/scrollbar input appear ignored. Each pane
+                // now owns its scroll state and manual input wins.
+                let manual_edit_sync_enabled = cfg!(not(target_os = "linux")) && !playback_follow_active;
                 let manual_sync_y = self.manual_edit_scroll_sync_y.unwrap_or(0.0).max(0.0);
                 ui.columns(2, |cols| {
                     engine_panel_frame().show(&mut cols[0], |ui| {
@@ -5159,7 +5656,7 @@ impl UiApp {
                         )
                         .max_height(transcript_height)
                         .show(ui, |ui| {
-                            if transcript_lines.is_empty() {
+                            if transcript_is_empty {
                                 ui.allocate_space(egui::vec2(
                                     ui.available_width(),
                                     (transcript_height - 8.0).max(0.0),
@@ -5772,8 +6269,90 @@ impl UiApp {
         self.push_status("Recovered from a UI panic; details saved to panic.log.");
     }
 
+    #[cfg(target_os = "linux")]
+    fn sync_linux_playback_frontend(&mut self) {
+        let snapshot = self.playback.snapshot();
+        self.playback_decode_in_progress = snapshot.decoding;
+        for notice in self.playback.take_notices() {
+            match notice {
+                linux_playback::PlaybackNotice::Loaded {
+                    path,
+                    start_sec,
+                    autoplay,
+                } => {
+                    self.playback_decode_in_progress = false;
+                    self.playback_decode_autoplay = false;
+                    if autoplay {
+                        self.push_status(&format!(
+                            "Playback started {:.2}s ({})",
+                            start_sec,
+                            path.display()
+                        ));
+                    } else {
+                        self.push_log_only(&format!(
+                            "Playback preloaded by isolated helper: {}",
+                            path.display()
+                        ));
+                    }
+                }
+                linux_playback::PlaybackNotice::Error { path, message } => {
+                    self.playback_decode_in_progress = false;
+                    self.playback_decode_autoplay = false;
+                    let location = path
+                        .as_ref()
+                        .map(|value| format!(" ({})", value.display()))
+                        .unwrap_or_default();
+                    self.push_status(&format!("Playback failed{location}: {message}"));
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_linux_dialog_results(&mut self) {
+        while let Ok(result) = self.dialog_rx.try_recv() {
+            self.dialog_busy = false;
+            match result {
+                LinuxDialogResult::Media(Ok(Some(paths))) => self.apply_media_paths(paths),
+                LinuxDialogResult::Outputs(Ok(Some(paths))) => self.apply_output_paths(paths),
+                LinuxDialogResult::ChatModel(Ok(Some(path))) => {
+                    self.apply_chat_model_path(path);
+                    self.push_status("Selected chat model.");
+                }
+                LinuxDialogResult::LiveSessionsFolder(Ok(Some(path))) => {
+                    self.apply_live_sessions_output_dir(path);
+                    self.push_status("Selected live sessions folder.");
+                }
+                LinuxDialogResult::Media(Ok(None)) => {
+                    self.push_status("Media file chooser cancelled.");
+                }
+                LinuxDialogResult::Outputs(Ok(None)) => {
+                    self.push_status("Output file chooser cancelled.");
+                }
+                LinuxDialogResult::ChatModel(Ok(None)) => {
+                    self.push_status("Chat model chooser cancelled.");
+                }
+                LinuxDialogResult::LiveSessionsFolder(Ok(None)) => {
+                    self.push_status("Live sessions folder chooser cancelled.");
+                }
+                LinuxDialogResult::Media(Err(error))
+                | LinuxDialogResult::Outputs(Err(error))
+                | LinuxDialogResult::ChatModel(Err(error))
+                | LinuxDialogResult::LiveSessionsFolder(Err(error)) => {
+                    self.open_modal("File dialog failed", &error, true);
+                    self.push_status(&format!("File dialog failed: {error}"));
+                }
+            }
+        }
+    }
+
     fn update_frame(&mut self, ctx: &egui::Context) {
         self.apply_font_size(ctx);
+        #[cfg(target_os = "linux")]
+        {
+            self.sync_linux_playback_frontend();
+            self.process_linux_dialog_results();
+        }
         self.process_messages();
         self.sync_runtime_missing_popup_session();
         self.persist_if_needed();
@@ -5838,12 +6417,17 @@ impl UiApp {
             .ok()
             .and_then(|state| state.download_status.clone())
             .is_some();
+        #[cfg(target_os = "linux")]
+        let dialog_busy = self.dialog_busy;
+        #[cfg(not(target_os = "linux"))]
+        let dialog_busy = false;
         if self.is_transcribing
             || self.is_chatting
             || self.anonymise_running
             || self.live_capture.is_some()
             || self.playback_decode_in_progress
             || playback_is_playing(&self.playback)
+            || dialog_busy
             || (self.editing_enabled && self.edit_pause_until.is_some())
             || self.runtime_install_in_progress
             || self.runtime_unblock_in_progress
@@ -6109,11 +6693,11 @@ fn default_runtime_backends_for_platform() -> Vec<String> {
     if cfg!(target_os = "macos") {
         return vec!["metal".to_string()];
     }
-    vec!["vulkan".to_string()]
+    vec!["vulkan".to_string(), "cuda".to_string()]
 }
 
 fn sort_runtime_backends_for_platform(options: &mut [String]) {
-    if cfg!(target_os = "windows") {
+    if cfg!(any(target_os = "windows", target_os = "linux")) {
         options.sort_by_key(|v| match v.to_ascii_lowercase().as_str() {
             "vulkan" => 0,
             "cuda" => 1,
@@ -6192,15 +6776,52 @@ fn sync_runtime_backend_from_installed_runtime(
         return changed;
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
     {
         let _ = (runtime_dir, settings, backends, selected_backend_index);
         false
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let detected_backend =
+            if runtime_dir == Path::new(runtime_installer::LINUX_CUDA_RUNTIME_DIR) {
+                "cuda"
+            } else {
+                "vulkan"
+            };
+        let detected_idx = resolve_runtime_backend_index(backends, detected_backend);
+        let mut changed = false;
+        if *selected_backend_index != detected_idx {
+            *selected_backend_index = detected_idx;
+            changed = true;
+        }
+        if !settings
+            .runtime_download_backend
+            .trim()
+            .eq_ignore_ascii_case(detected_backend)
+        {
+            settings.runtime_download_backend = detected_backend.to_string();
+            changed = true;
+        }
+        changed
     }
 }
 
 fn should_auto_select_gpu_from_settings(settings: &AppSettings) -> bool {
     !settings.whisper_no_gpu && selected_gpu_index_from_settings(settings).is_none()
+}
+
+fn normalize_audio_device_settings(
+    settings: &mut AppSettings,
+    devices: &[AudioDeviceOption],
+    selected_index: usize,
+) -> bool {
+    let had_explicit_gpu = selected_gpu_index_from_settings(settings).is_some();
+    if !had_explicit_gpu && !should_auto_select_gpu_from_settings(settings) {
+        return false;
+    }
+    apply_audio_device_to_settings_from_index(settings, devices, selected_index)
 }
 
 fn apply_audio_device_to_settings_from_index(
@@ -7411,6 +8032,7 @@ fn secs_to_hms(seconds: f64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_total_time(state: &PlaybackState) -> f64 {
     if let Some(shared) = state.shared.as_ref() {
         if let Ok(inner) = shared.try_lock() {
@@ -7422,6 +8044,12 @@ fn playback_total_time(state: &PlaybackState) -> f64 {
     0.0
 }
 
+#[cfg(target_os = "linux")]
+fn playback_total_time(state: &PlaybackState) -> f64 {
+    state.snapshot().total_sec
+}
+
+#[cfg(not(target_os = "linux"))]
 fn playback_is_playing(state: &PlaybackState) -> bool {
     if let Some(shared) = state.shared.as_ref() {
         if let Ok(inner) = shared.try_lock() {
@@ -7429,6 +8057,11 @@ fn playback_is_playing(state: &PlaybackState) -> bool {
         }
     }
     false
+}
+
+#[cfg(target_os = "linux")]
+fn playback_is_playing(state: &PlaybackState) -> bool {
+    state.snapshot().playing
 }
 
 #[cfg(test)]
@@ -7608,6 +8241,40 @@ mod tests {
     }
 
     #[test]
+    fn invalid_saved_gpu_index_is_normalized_to_selected_runtime_gpu() {
+        let devices = vec![
+            AudioDeviceOption {
+                label: "CPU (no GPU)".to_string(),
+                devices_value: "none".to_string(),
+                main_gpu: 0,
+                is_gpu: false,
+                detail_line: "CPU".to_string(),
+            },
+            AudioDeviceOption {
+                label: "GPU #0 (CUDA): NVIDIA".to_string(),
+                devices_value: "0".to_string(),
+                main_gpu: 0,
+                is_gpu: true,
+                detail_line: "CUDA0".to_string(),
+            },
+        ];
+        let mut settings = AppSettings::default();
+        settings.devices = "3".to_string();
+        settings.main_gpu = 3;
+
+        let selected = resolve_audio_device_index(&devices, &settings);
+        assert_eq!(selected, 1);
+        assert!(normalize_audio_device_settings(
+            &mut settings,
+            &devices,
+            selected
+        ));
+        assert_eq!(settings.devices, "0");
+        assert_eq!(settings.main_gpu, 0);
+        assert!(!settings.whisper_no_gpu);
+    }
+
+    #[test]
     fn resolve_runtime_backend_index_prefers_first_when_missing() {
         let options = vec!["vulkan".to_string(), "cuda".to_string()];
         assert_eq!(resolve_runtime_backend_index(&options, ""), 0);
@@ -7618,6 +8285,102 @@ mod tests {
     fn resolve_runtime_backend_index_matches_case_insensitive() {
         let options = vec!["vulkan".to_string(), "cuda".to_string()];
         assert_eq!(resolve_runtime_backend_index(&options, "CUDA"), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_runtime_options_and_roots_are_fixed_to_apt_packages() {
+        assert_eq!(
+            default_runtime_backends_for_platform(),
+            vec!["vulkan".to_string(), "cuda".to_string()]
+        );
+        assert_eq!(
+            resolve_runtime_dir(Path::new(runtime_installer::LINUX_VULKAN_RUNTIME_DIR)),
+            PathBuf::from(runtime_installer::LINUX_VULKAN_RUNTIME_DIR)
+        );
+        assert_eq!(
+            resolve_runtime_dir(Path::new(runtime_installer::LINUX_CUDA_RUNTIME_DIR)),
+            PathBuf::from(runtime_installer::LINUX_CUDA_RUNTIME_DIR)
+        );
+        assert_eq!(
+            resolve_runtime_dir(Path::new("/tmp/legacy-downloaded-engine")),
+            PathBuf::from(runtime_installer::LINUX_VULKAN_RUNTIME_DIR)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_isolated_cuda_device_output_with_cuda_gpu_zero() {
+        let stdout = concat!(
+            "devices_count=2\n",
+            "device index=0 backend=CUDA name=CUDA0 desc=NVIDIA GeForce RTX 5090 Laptop GPU type=1 free_mib=23469.0 total_mib=24022.7\n",
+            "device index=1 backend=CPU name=CPU desc=Intel(R) Core(TM) Ultra 9 275HX type=0 free_mib=128221.7 total_mib=128221.7\n",
+        );
+        let devices = parse_linux_engine_devices(stdout, "CUDA").expect("parse CUDA devices");
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].index, 0);
+        assert_eq!(devices[0].backend, "CUDA");
+        assert_eq!(devices[0].name, "CUDA0");
+        assert!(devices[0].description.contains("RTX 5090"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn isolated_cuda_device_parser_rejects_vulkan_contamination() {
+        let stdout = concat!(
+            "devices_count=2\n",
+            "device index=0 backend=Vulkan name=Vulkan0 desc=Intel Graphics type=2 free_mib=100.0 total_mib=200.0\n",
+            "device index=1 backend=CPU name=CPU desc=CPU type=0 free_mib=100.0 total_mib=200.0\n",
+        );
+        let error = parse_linux_engine_devices(stdout, "CUDA").unwrap_err();
+        assert!(error.to_string().contains("unexpected Vulkan GPU backend"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_selected_runtime_transcription_e2e_when_fixture_environment_is_set() {
+        let Ok(audio_path) = env::var("TRANSCRIBE_E2E_AUDIO") else {
+            return;
+        };
+        let Ok(whisper_model) = env::var("TRANSCRIBE_E2E_WHISPER_MODEL") else {
+            return;
+        };
+        let runtime_backend = env::var("TRANSCRIBE_E2E_RUNTIME")
+            .unwrap_or_else(|_| "cuda".to_string())
+            .to_ascii_lowercase();
+        let (runtime_dir, gpu_index, expected_backend) = match runtime_backend.as_str() {
+            "cuda" => (runtime_installer::LINUX_CUDA_RUNTIME_DIR, 0, "CUDA"),
+            "vulkan" => (runtime_installer::LINUX_VULKAN_RUNTIME_DIR, 1, "Vulkan"),
+            other => panic!("unsupported TRANSCRIBE_E2E_RUNTIME '{other}'"),
+        };
+        let mut settings = AppSettings::default();
+        settings.runtime_dir = runtime_dir.to_string();
+        settings.runtime_download_backend = runtime_backend;
+        settings.audio_file = audio_path;
+        settings.whisper_model = whisper_model;
+        settings.mode = "speech".to_string();
+        settings.custom_mode = "auto".to_string();
+        settings.speech_custom_mode = "auto".to_string();
+        settings.diarization_enabled = false;
+        settings.whisper_no_gpu = false;
+        settings.devices = gpu_index.to_string();
+        settings.main_gpu = gpu_index;
+
+        let mut stages = Vec::new();
+        let result = run_transcription_with_progress(settings, |stage| stages.push(stage))
+            .expect("transcription through isolated app Engine path");
+        assert!(result.output_path.is_file());
+        assert!(
+            result
+                .output_text
+                .to_ascii_lowercase()
+                .contains("fellow americans"),
+            "unexpected transcript: {}",
+            result.output_text
+        );
+        assert!(stages.iter().any(|stage| stage.contains(&format!(
+            "running {expected_backend} Engine subprocess on GPU {gpu_index}"
+        ))));
     }
 
     #[cfg(target_os = "windows")]
@@ -7657,6 +8420,17 @@ mod tests {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    {
+        let args = env::args().collect::<Vec<_>>();
+        if let Some(exit_code) = linux_playback::maybe_run_helper(&args) {
+            std::process::exit(exit_code);
+        }
+        if let Some(exit_code) = live::maybe_run_linux_live_helper(&args) {
+            std::process::exit(exit_code);
+        }
+    }
+
     configure_ui_startup();
 
     let paths = match app_paths().and_then(|p| {
@@ -7687,7 +8461,7 @@ fn main() {
     let _ = eframe::run_native(
         "Transcribe Offline",
         options,
-        Box::new(move |_| Ok(Box::new(UiApp::new(paths)))),
+        Box::new(move |creation_context| Ok(Box::new(UiApp::new(paths, creation_context)))),
     );
 }
 

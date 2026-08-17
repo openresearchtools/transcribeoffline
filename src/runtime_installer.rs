@@ -20,6 +20,11 @@ const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/openresearchtools/engine/releases/latest/download/engine-manifest.json";
 const APP_UA: &str = "TranscribeOffline/1.0";
 
+#[cfg(target_os = "linux")]
+pub const LINUX_VULKAN_RUNTIME_DIR: &str = "/opt/openresearchtools/engine/vulkan";
+#[cfg(target_os = "linux")]
+pub const LINUX_CUDA_RUNTIME_DIR: &str = "/opt/openresearchtools/engine/cuda";
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct EngineManifest {
     #[serde(default)]
@@ -52,6 +57,33 @@ struct ManifestSources {
     sources: Vec<String>,
 }
 
+#[cfg(target_os = "linux")]
+pub fn linux_system_runtime_dir_for_backend(backend: &str) -> Result<PathBuf> {
+    match backend.trim().to_ascii_lowercase().as_str() {
+        "" | "vulkan" => Ok(PathBuf::from(LINUX_VULKAN_RUNTIME_DIR)),
+        "cuda" => Ok(PathBuf::from(LINUX_CUDA_RUNTIME_DIR)),
+        other => bail!("unsupported Linux engine backend '{other}' (expected 'vulkan' or 'cuda')"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn install_or_repair_runtime_with_backend(
+    _runtime_dir: &Path,
+    _paths: &AppPaths,
+    preferred_backend: Option<&str>,
+    mut on_status: impl FnMut(String),
+) -> Result<PathBuf> {
+    let backend = preferred_backend.unwrap_or("vulkan");
+    let installed_dir = linux_system_runtime_dir_for_backend(backend)?;
+    on_status(format!(
+        "Using APT-installed {} engine runtime: {}",
+        backend.trim().to_ascii_uppercase(),
+        installed_dir.display()
+    ));
+    Ok(installed_dir)
+}
+
+#[cfg(not(target_os = "linux"))]
 pub fn install_or_repair_runtime_with_backend(
     runtime_dir: &Path,
     paths: &AppPaths,
@@ -117,6 +149,12 @@ pub fn install_or_repair_runtime_with_backend(
     Ok(installed_dir)
 }
 
+#[cfg(target_os = "linux")]
+pub fn available_runtime_backends(_paths: &AppPaths) -> Result<Vec<String>> {
+    Ok(vec!["vulkan".to_string(), "cuda".to_string()])
+}
+
+#[cfg(not(target_os = "linux"))]
 pub fn available_runtime_backends(paths: &AppPaths) -> Result<Vec<String>> {
     let exe_dir = env::current_exe()
         .ok()
@@ -693,6 +731,20 @@ fn install_runtime_asset(
 #[cfg(test)]
 mod tests {
     use super::{filtered_assets_for_platform_key, EngineManifest, ManifestAsset};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn maps_linux_backends_to_apt_package_roots() {
+        assert_eq!(
+            super::linux_system_runtime_dir_for_backend("vulkan").unwrap(),
+            std::path::PathBuf::from(super::LINUX_VULKAN_RUNTIME_DIR)
+        );
+        assert_eq!(
+            super::linux_system_runtime_dir_for_backend("CUDA").unwrap(),
+            std::path::PathBuf::from(super::LINUX_CUDA_RUNTIME_DIR)
+        );
+        assert!(super::linux_system_runtime_dir_for_backend("metal").is_err());
+    }
 
     fn asset(platform: &str, backend: &str, id: &str) -> ManifestAsset {
         ManifestAsset {

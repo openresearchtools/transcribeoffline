@@ -4334,6 +4334,7 @@ dependencies = [
  "ico",
  "libloading",
  "open",
+ "pollster",
  "regex",
  "reqwest",
  "rfd",

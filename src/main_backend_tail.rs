@@ -1,4 +1,312 @@
-fn run_transcription_with_progress<F>(
+fn run_transcription_with_progress<F>(settings: AppSettings, progress: F) -> Result<TranscriptionResult>
+where
+    F: FnMut(String),
+{
+    #[cfg(target_os = "linux")]
+    {
+        return run_transcription_via_engine_cli(settings, progress);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    run_transcription_in_process_with_progress(settings, progress)
+}
+
+#[cfg(target_os = "linux")]
+fn run_transcription_via_engine_cli<F>(
+    settings: AppSettings,
+    mut progress: F,
+) -> Result<TranscriptionResult>
+where
+    F: FnMut(String),
+{
+    let started_at = Instant::now();
+    progress("validating input".to_string());
+    if settings.audio_file.trim().is_empty() {
+        bail!("audio file is required");
+    }
+    if settings.whisper_model.trim().is_empty() {
+        bail!("whisper model path is required");
+    }
+
+    let audio_path = PathBuf::from(settings.audio_file.trim());
+    if !audio_path.is_file() {
+        bail!("audio file not found: '{}'", audio_path.display());
+    }
+    let whisper_model = PathBuf::from(settings.whisper_model.trim());
+    if !whisper_model.is_file() {
+        bail!("whisper model not found: '{}'", whisper_model.display());
+    }
+
+    let prepare_started = Instant::now();
+    let output_dir = audio_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    fs::create_dir_all(&output_dir)
+        .with_context(|| format!("failed to create output dir '{}'", output_dir.display()))?;
+
+    let mode_norm = settings.mode.trim().to_ascii_lowercase();
+    let mut custom_value = settings.custom_mode.trim().to_string();
+    if mode_norm == "subtitle" {
+        let subtitle_custom = settings.subtitle_custom_mode.trim();
+        if !subtitle_custom.is_empty() {
+            custom_value = subtitle_custom.to_string();
+        }
+        if !is_default_or_positive_float(&custom_value) {
+            bail!("subtitle custom must be 'default'/'auto' or a positive number of seconds");
+        }
+    } else if mode_norm == "speech" {
+        let speech_custom = settings.speech_custom_mode.trim();
+        if !speech_custom.is_empty() {
+            custom_value = speech_custom.to_string();
+        }
+        if !is_default_or_positive_float(&custom_value) {
+            bail!("speech custom must be 'default'/'auto' or a positive number of seconds");
+        }
+    }
+    if custom_value.is_empty() {
+        custom_value = "default".to_string();
+    }
+
+    let diarization_enabled = mode_norm == "transcript";
+    let diarization_model_path = if diarization_enabled {
+        if settings.diarization_models_dir.trim().is_empty() {
+            bail!("diarization is enabled but diarization models dir is empty");
+        }
+        let path = PathBuf::from(settings.diarization_models_dir.trim())
+            .join(SORTFORMER_MODEL_FILE);
+        if !path.is_file() {
+            bail!("diarization model not found: '{}'", path.display());
+        }
+        Some(path)
+    } else {
+        None
+    };
+
+    let runtime_dir = resolve_runtime_dir(Path::new(settings.runtime_dir.trim()));
+    let cli = runtime_dir.join("example-cli");
+    if !cli.is_file() {
+        bail!("selected Linux Engine CLI is missing: '{}'", cli.display());
+    }
+    let backend = linux_runtime_backend_label(&runtime_dir);
+    let selected_gpu = selected_gpu_index_from_settings(&settings);
+    if let Some(gpu_index) = selected_gpu {
+        let isolated_devices = enumerate_audio_device_options(&runtime_dir);
+        if !isolated_devices
+            .iter()
+            .any(|device| device.is_gpu && device.main_gpu == gpu_index)
+        {
+            bail!(
+                "selected GPU index {} is not available in the isolated {} runtime device list; re-select the execution device",
+                gpu_index,
+                backend
+            );
+        }
+    }
+
+    let response_path = linux_engine_cli_response_path();
+    let response_guard = RemoveFileOnDrop(response_path.clone());
+    let mut command = Command::new(&cli);
+    command
+        .current_dir(&runtime_dir)
+        .arg("audio")
+        .arg("--audio-file")
+        .arg(&audio_path)
+        .arg("--audio-format")
+        .arg(infer_audio_format(&audio_path))
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--mode")
+        .arg(&mode_norm)
+        .arg("--custom")
+        .arg(&custom_value)
+        .arg("--whisper-model")
+        .arg(&whisper_model)
+        .arg("--whisper-offline")
+        .arg("--ffmpeg-convert")
+        .arg("--n-ctx")
+        .arg(settings.n_ctx.to_string())
+        .arg("--n-batch")
+        .arg(settings.n_batch.to_string())
+        .arg("--n-ubatch")
+        .arg(settings.n_ubatch.to_string())
+        .arg("--n-parallel")
+        .arg(settings.n_parallel.to_string())
+        .arg("--out")
+        .arg(&response_path);
+
+    if settings.n_threads > 0 {
+        command.arg("--threads").arg(settings.n_threads.to_string());
+    }
+    if settings.n_threads_batch > 0 {
+        command
+            .arg("--threads-batch")
+            .arg(settings.n_threads_batch.to_string());
+    }
+    if let Ok(offset) = settings.whisper_word_time_offset_sec.trim().parse::<f64>() {
+        if offset.is_finite() {
+            command
+                .arg("--whisper-word-time-offset-sec")
+                .arg(offset.to_string());
+        }
+    }
+    if let Some(path) = diarization_model_path.as_ref() {
+        command
+            .arg("--diarization-model-path")
+            .arg(path)
+            .arg("--diarization-backend")
+            .arg("sortformer")
+            .arg("--diarization-feed-ms")
+            .arg("10800001");
+    }
+    if let Some(gpu_index) = selected_gpu {
+        command
+            .arg("--gpu")
+            .arg(gpu_index.to_string())
+            .arg("--whisper-gpu-device")
+            .arg(gpu_index.to_string());
+    } else {
+        command
+            .arg("--devices")
+            .arg("none")
+            .arg("--n-gpu-layers")
+            .arg("0")
+            .arg("--main-gpu")
+            .arg("-1")
+            .arg("--whisper-no-gpu");
+    }
+
+    let execution_target = selected_gpu
+        .map(|index| format!("GPU {index}"))
+        .unwrap_or_else(|| "CPU".to_string());
+    let timing_prepare_ms = prepare_started.elapsed().as_millis();
+    progress(format!(
+        "running {backend} Engine subprocess on {execution_target}"
+    ));
+    let bridge_started = Instant::now();
+    let output = command.output().with_context(|| {
+        format!(
+            "failed to launch selected {} Engine CLI '{}'",
+            backend,
+            cli.display()
+        )
+    })?;
+    let timing_bridge_ms = bridge_started.elapsed().as_millis();
+    if !output.status.success() {
+        bail!(
+            "{} Engine transcription subprocess failed ({}). stdout: {} stderr: {}",
+            backend,
+            output.status,
+            output_tail(&output.stdout),
+            output_tail(&output.stderr)
+        );
+    }
+
+    progress(format!(
+        "{backend} Engine subprocess completed on {execution_target}"
+    ));
+    let response_bytes = fs::read(&response_path).with_context(|| {
+        format!(
+            "{} Engine did not produce response file '{}'",
+            backend,
+            response_path.display()
+        )
+    })?;
+    let response_json: Value = serde_json::from_slice(&response_bytes).with_context(|| {
+        format!(
+            "{} Engine produced invalid response JSON; stdout: {} stderr: {}",
+            backend,
+            output_tail(&output.stdout),
+            output_tail(&output.stderr)
+        )
+    })?;
+    drop(response_guard);
+
+    progress("loading generated output text".to_string());
+    let output_path = response_json
+        .pointer("/output/path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fallback_output_path(&audio_path, &settings.mode, &output_dir));
+    let read_output_started = Instant::now();
+    let output_text = fs::read_to_string(&output_path)
+        .with_context(|| format!("failed to read output '{}'", output_path.display()))?;
+    let timing_read_output_ms = read_output_started.elapsed().as_millis();
+
+    Ok(TranscriptionResult {
+        _response_json: response_json,
+        output_path,
+        output_text,
+        preprocess_note: format!(
+            "Processed by isolated {backend} Engine subprocess; FFmpeg conversion enabled."
+        ),
+        mode: settings.mode,
+        custom_value,
+        whisper_model: settings.whisper_model,
+        diarization_enabled,
+        timing_prepare_ms,
+        timing_read_audio_ms: 0,
+        timing_bridge_ms,
+        timing_read_output_ms,
+        timing_total_ms: started_at.elapsed().as_millis(),
+        audio_bytes_len: fs::metadata(&audio_path)
+            .map(|metadata| metadata.len() as usize)
+            .unwrap_or(0),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_runtime_backend_label(runtime_dir: &Path) -> &'static str {
+    if runtime_dir == Path::new(crate::runtime_installer::LINUX_CUDA_RUNTIME_DIR) {
+        "CUDA"
+    } else {
+        "Vulkan"
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_engine_cli_response_path() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let base = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(env::temp_dir);
+    let nonce = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    base.join(format!(
+        "transcribe-offline-engine-response-{}-{nonce}.json",
+        std::process::id()
+    ))
+}
+
+#[cfg(target_os = "linux")]
+struct RemoveFileOnDrop(PathBuf);
+
+#[cfg(target_os = "linux")]
+impl Drop for RemoveFileOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn output_tail(raw: &[u8]) -> String {
+    const MAX_CHARS: usize = 2_000;
+    let text = String::from_utf8_lossy(raw);
+    let char_count = text.chars().count();
+    if char_count <= MAX_CHARS {
+        return text.trim().to_string();
+    }
+    text.chars()
+        .skip(char_count - MAX_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_transcription_in_process_with_progress<F>(
     settings: AppSettings,
     mut progress: F,
 ) -> Result<TranscriptionResult>
@@ -173,6 +481,134 @@ where
 }
 
 fn run_chat(settings: AppSettings) -> Result<String> {
+    #[cfg(target_os = "linux")]
+    {
+        return run_chat_via_engine_cli(settings);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    run_chat_in_process(settings)
+}
+
+#[cfg(target_os = "linux")]
+fn run_chat_via_engine_cli(settings: AppSettings) -> Result<String> {
+    if settings.chat_model.trim().is_empty() {
+        bail!("chat model path is required");
+    }
+    if settings.chat_prompt.trim().is_empty() {
+        bail!("chat prompt is required");
+    }
+
+    let mut prompt = settings.chat_prompt.clone();
+    if !settings.chat_context_file.trim().is_empty() {
+        let context_path = PathBuf::from(settings.chat_context_file.trim());
+        let context = fs::read_to_string(&context_path)
+            .with_context(|| format!("failed to read context file '{}'", context_path.display()))?;
+        prompt = format!("{prompt}\n\nContext markdown:\n\n{context}");
+    }
+
+    let runtime_dir = resolve_runtime_dir(Path::new(settings.runtime_dir.trim()));
+    let backend = linux_runtime_backend_label(&runtime_dir);
+    let cli = runtime_dir.join("example-cli");
+    if !cli.is_file() {
+        bail!("selected Linux Engine CLI is missing: '{}'", cli.display());
+    }
+    let selected_gpu = selected_gpu_index_from_settings(&settings);
+    if let Some(gpu_index) = selected_gpu {
+        let isolated_devices = enumerate_audio_device_options(&runtime_dir);
+        if !isolated_devices
+            .iter()
+            .any(|device| device.is_gpu && device.main_gpu == gpu_index)
+        {
+            bail!(
+                "selected GPU index {} is not available in the isolated {} runtime device list; re-select the execution device",
+                gpu_index,
+                backend
+            );
+        }
+    }
+
+    let output_path = linux_engine_cli_response_path().with_extension("txt");
+    let output_guard = RemoveFileOnDrop(output_path.clone());
+    let mut command = Command::new(&cli);
+    command
+        .current_dir(&runtime_dir)
+        .arg("chat")
+        .arg("--model")
+        .arg(settings.chat_model.trim())
+        .arg("--prompt")
+        .arg(&prompt)
+        .arg("--n-predict")
+        .arg("10000")
+        .arg("--n-ctx")
+        .arg(settings.n_ctx.to_string())
+        .arg("--n-batch")
+        .arg(settings.n_batch.to_string())
+        .arg("--n-ubatch")
+        .arg(settings.n_ubatch.to_string())
+        .arg("--n-parallel")
+        .arg(settings.n_parallel.to_string())
+        .arg("--out")
+        .arg(&output_path);
+    if settings.n_threads > 0 {
+        command.arg("--threads").arg(settings.n_threads.to_string());
+    }
+    if settings.n_threads_batch > 0 {
+        command
+            .arg("--threads-batch")
+            .arg(settings.n_threads_batch.to_string());
+    }
+    if settings.chat_allow_thinking {
+        command
+            .arg("--reasoning")
+            .arg("on")
+            .arg("--reasoning-budget")
+            .arg("-1")
+            .arg("--reasoning-format")
+            .arg("deepseek");
+    } else {
+        command.arg("--reasoning").arg("off");
+    }
+    if let Some(gpu_index) = selected_gpu {
+        command.arg("--gpu").arg(gpu_index.to_string());
+    } else {
+        command
+            .arg("--devices")
+            .arg("none")
+            .arg("--n-gpu-layers")
+            .arg("0")
+            .arg("--main-gpu")
+            .arg("-1");
+    }
+    let output = command.output().with_context(|| {
+        format!(
+            "failed to launch selected {} Engine CLI '{}'",
+            backend,
+            cli.display()
+        )
+    })?;
+    if !output.status.success() {
+        bail!(
+            "{} Engine chat subprocess failed ({}). stdout: {} stderr: {}",
+            backend,
+            output.status,
+            output_tail(&output.stdout),
+            output_tail(&output.stderr)
+        );
+    }
+    let answer = fs::read_to_string(&output_path).with_context(|| {
+        format!(
+            "{} Engine did not produce chat output file '{}'",
+            backend,
+            output_path.display()
+        )
+    })?;
+    drop(output_guard);
+    Ok(answer)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_chat_in_process(settings: AppSettings) -> Result<String> {
     if settings.chat_model.trim().is_empty() {
         bail!("chat model path is required");
     }
@@ -466,21 +902,30 @@ fn backend_priority_for_platform(backend_norm: &str) -> i32 {
 }
 
 fn enumerate_audio_device_options(runtime_dir: &Path) -> Vec<AudioDeviceOption> {
-    let mut options = vec![AudioDeviceOption {
-        label: AUDIO_DEVICE_CPU_LABEL.to_string(),
-        devices_value: "none".to_string(),
-        main_gpu: 0,
-        is_gpu: false,
-        detail_line: AUDIO_DEVICE_CPU_LABEL.to_string(),
-    }];
+    let mut options = pending_audio_device_options();
     let mut chosen_by_gpu = HashMap::<String, (i32, AudioDeviceOption)>::new();
 
-    configure_runtime_dll_search(runtime_dir);
-    let Ok(api) = BridgeApi::load(runtime_dir) else {
-        return options;
+    #[cfg(target_os = "linux")]
+    let devices = match enumerate_linux_engine_devices(runtime_dir) {
+        Ok(devices) => devices,
+        Err(error) => {
+            options[0].detail_line = format!(
+                "CPU (no GPU) - selected Engine device probe failed: {error}"
+            );
+            return options;
+        }
     };
-    let Ok(devices) = api.list_devices() else {
-        return options;
+
+    #[cfg(not(target_os = "linux"))]
+    let devices = {
+        configure_runtime_dll_search(runtime_dir);
+        let Ok(api) = BridgeApi::load(runtime_dir) else {
+            return options;
+        };
+        let Ok(devices) = api.list_devices() else {
+            return options;
+        };
+        devices
     };
 
     for dev in devices {
@@ -549,6 +994,101 @@ fn enumerate_audio_device_options(runtime_dir: &Path) -> Vec<AudioDeviceOption> 
     }
 
     options
+}
+
+fn pending_audio_device_options() -> Vec<AudioDeviceOption> {
+    vec![AudioDeviceOption {
+        label: AUDIO_DEVICE_CPU_LABEL.to_string(),
+        devices_value: "none".to_string(),
+        main_gpu: 0,
+        is_gpu: false,
+        detail_line: AUDIO_DEVICE_CPU_LABEL.to_string(),
+    }]
+}
+
+#[cfg(target_os = "linux")]
+fn enumerate_linux_engine_devices(runtime_dir: &Path) -> Result<Vec<bridge::DeviceInfo>> {
+    let cli = runtime_dir.join("example-cli");
+    if !cli.is_file() {
+        bail!("missing selected Engine CLI '{}'", cli.display());
+    }
+    let output = Command::new(&cli)
+        .arg("list-devices")
+        .current_dir(runtime_dir)
+        .output()
+        .with_context(|| format!("failed to run '{}' list-devices", cli.display()))?;
+    if !output.status.success() {
+        bail!(
+            "'{} list-devices' failed ({}): {}",
+            cli.display(),
+            output.status,
+            output_tail(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .context("selected Engine list-devices output was not UTF-8")?;
+    parse_linux_engine_devices(&stdout, linux_runtime_backend_label(runtime_dir))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_engine_devices(
+    stdout: &str,
+    expected_gpu_backend: &str,
+) -> Result<Vec<bridge::DeviceInfo>> {
+    static DEVICE_LINE_RE: OnceLock<Regex> = OnceLock::new();
+    let device_line_re = DEVICE_LINE_RE.get_or_init(|| {
+        Regex::new(
+            r"^device index=(?P<index>-?[0-9]+) backend=(?P<backend>\S+) name=(?P<name>\S+) desc=(?P<desc>.*?) type=(?P<type>-?[0-9]+) free_mib=(?P<free>[0-9]+(?:\.[0-9]+)?) total_mib=(?P<total>[0-9]+(?:\.[0-9]+)?)$",
+        )
+        .expect("valid Engine list-devices regex")
+    });
+
+    let declared_count = stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("devices_count="))
+        .ok_or_else(|| anyhow!("missing devices_count in selected Engine output"))?
+        .parse::<usize>()
+        .context("invalid devices_count in selected Engine output")?;
+    let mut devices = Vec::with_capacity(declared_count);
+    for line in stdout.lines().map(str::trim) {
+        if !line.starts_with("device index=") {
+            continue;
+        }
+        let captures = device_line_re
+            .captures(line)
+            .ok_or_else(|| anyhow!("invalid selected Engine device line: {line}"))?;
+        let backend = captures["backend"].to_string();
+        if !backend.eq_ignore_ascii_case("cpu")
+            && !backend.eq_ignore_ascii_case(expected_gpu_backend)
+        {
+            bail!(
+                "selected {expected_gpu_backend} Engine reported unexpected {backend} GPU backend"
+            );
+        }
+        let free_mib = captures["free"]
+            .parse::<f64>()
+            .context("invalid free_mib in selected Engine device line")?;
+        let total_mib = captures["total"]
+            .parse::<f64>()
+            .context("invalid total_mib in selected Engine device line")?;
+        devices.push(bridge::DeviceInfo {
+            index: captures["index"]
+                .parse::<i32>()
+                .context("invalid device index in selected Engine output")?,
+            backend,
+            name: captures["name"].to_string(),
+            description: captures["desc"].trim().to_string(),
+            memory_free: (free_mib * 1024.0 * 1024.0).max(0.0) as u64,
+            memory_total: (total_mib * 1024.0 * 1024.0).max(0.0) as u64,
+        });
+    }
+    if devices.len() != declared_count {
+        bail!(
+            "selected Engine declared {declared_count} devices but returned {} parseable device lines",
+            devices.len()
+        );
+    }
+    Ok(devices)
 }
 
 fn resolve_audio_device_label(
@@ -1083,31 +1623,43 @@ fn configure_ui_startup() {
 }
 
 fn resolve_runtime_dir(preferred: &Path) -> PathBuf {
-    let candidates = runtime_dir_candidates(preferred);
-
-    for dir in &candidates {
-        if has_bridge_library(dir) {
-            return dir.clone();
+    #[cfg(target_os = "linux")]
+    {
+        if preferred == Path::new(crate::runtime_installer::LINUX_CUDA_RUNTIME_DIR) {
+            return PathBuf::from(crate::runtime_installer::LINUX_CUDA_RUNTIME_DIR);
         }
-    }
-    for dir in &candidates {
-        if dir.exists() {
-            return dir.clone();
-        }
+        return PathBuf::from(crate::runtime_installer::LINUX_VULKAN_RUNTIME_DIR);
     }
 
-    if preferred.as_os_str().is_empty() {
-        crate::settings::default_runtime_dir()
-    } else {
-        let mapped = crate::settings::normalize_runtime_dir_alias(&preferred.to_string_lossy());
-        if mapped.trim().is_empty() {
-            preferred.to_path_buf()
+    #[cfg(not(target_os = "linux"))]
+    {
+        let candidates = runtime_dir_candidates(preferred);
+
+        for dir in &candidates {
+            if has_bridge_library(dir) {
+                return dir.clone();
+            }
+        }
+        for dir in &candidates {
+            if dir.exists() {
+                return dir.clone();
+            }
+        }
+
+        if preferred.as_os_str().is_empty() {
+            crate::settings::default_runtime_dir()
         } else {
-            PathBuf::from(mapped)
+            let mapped = crate::settings::normalize_runtime_dir_alias(&preferred.to_string_lossy());
+            if mapped.trim().is_empty() {
+                preferred.to_path_buf()
+            } else {
+                PathBuf::from(mapped)
+            }
         }
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn runtime_dir_candidates(preferred: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let fallback = crate::settings::default_runtime_dir();
@@ -1123,6 +1675,7 @@ fn runtime_dir_candidates(preferred: &Path) -> Vec<PathBuf> {
     dedupe_paths(out)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for p in paths {
@@ -1259,6 +1812,7 @@ fn playback_paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_current_time(state: &PlaybackState) -> f64 {
     if let Some(shared) = state.shared.as_ref() {
         if let Ok(inner) = shared.try_lock() {
@@ -1270,6 +1824,7 @@ fn playback_current_time(state: &PlaybackState) -> f64 {
     0.0
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_has_audio(state: &PlaybackState) -> bool {
     if let Some(shared) = state.shared.as_ref() {
         if let Ok(inner) = shared.lock() {
@@ -1279,6 +1834,7 @@ fn playback_has_audio(state: &PlaybackState) -> bool {
     false
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_is_ended(state: &PlaybackState) -> bool {
     if let Some(shared) = state.shared.as_ref() {
         if let Ok(inner) = shared.lock() {
@@ -1288,6 +1844,7 @@ fn playback_is_ended(state: &PlaybackState) -> bool {
     false
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_apply_speed(state: &mut PlaybackState) {
     if let Some(shared) = state.shared.as_ref() {
         if let Ok(mut inner) = shared.lock() {
@@ -1296,6 +1853,7 @@ fn playback_apply_speed(state: &mut PlaybackState) {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_build_stream(
     shared: Arc<Mutex<PlaybackBuffer>>,
 ) -> Result<(Stream, StreamConfig, SampleFormat, u32, u16)> {
@@ -1344,6 +1902,7 @@ fn playback_build_stream(
     ))
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_write_output_f32(
     data: &mut [f32],
     out_channels: usize,
@@ -1358,6 +1917,7 @@ fn playback_write_output_f32(
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_write_output_i16(
     data: &mut [i16],
     out_channels: usize,
@@ -1374,6 +1934,7 @@ fn playback_write_output_i16(
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_write_output_u16(
     data: &mut [u16],
     out_channels: usize,
@@ -1391,6 +1952,7 @@ fn playback_write_output_u16(
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_fill_samples<T, F>(
     data: &mut [T],
     out_channels: usize,
@@ -1442,6 +2004,7 @@ fn playback_fill_samples<T, F>(
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn decode_audio_to_stereo_f32(audio_path: &Path, dst_rate: u32) -> Result<Vec<f32>> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
@@ -1553,6 +2116,7 @@ fn decode_audio_to_stereo_f32(audio_path: &Path, dst_rate: u32) -> Result<Vec<f3
     ))
 }
 
+#[cfg(not(target_os = "linux"))]
 fn resample_stereo_linear(samples_stereo: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
     if src_rate == 0 || dst_rate == 0 || samples_stereo.len() < 4 {
         return samples_stereo.to_vec();
@@ -1587,6 +2151,7 @@ fn resample_stereo_linear(samples_stereo: &[f32], src_rate: u32, dst_rate: u32) 
     out
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_ensure_stream(state: &mut PlaybackState) -> Result<()> {
     if state.stream.is_some() && state.shared.is_some() {
         return Ok(());
@@ -1602,6 +2167,7 @@ fn playback_ensure_stream(state: &mut PlaybackState) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_start_from(state: &mut PlaybackState, audio_path: &Path, start_sec: f64) -> Result<()> {
     let runtime_dir = resolve_runtime_dir(Path::new(""));
     configure_runtime_dll_search(&runtime_dir);
@@ -1647,6 +2213,7 @@ fn playback_start_from(state: &mut PlaybackState, audio_path: &Path, start_sec: 
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_set_decoded_buffer(
     state: &mut PlaybackState,
     audio_path: &Path,
@@ -1675,6 +2242,7 @@ fn playback_set_decoded_buffer(
     Ok(playback_current_time(state))
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_set_decoded_buffer_paused(
     state: &mut PlaybackState,
     audio_path: &Path,
@@ -1700,6 +2268,7 @@ fn playback_set_decoded_buffer_paused(
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_has_loaded_path(state: &PlaybackState, path: &Path) -> bool {
     let normalized_path = normalize_playback_path(path);
     if let Some(shared) = state.shared.as_ref() {
@@ -1715,6 +2284,7 @@ fn playback_has_loaded_path(state: &PlaybackState, path: &Path) -> bool {
     false
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_toggle_pause(state: &mut PlaybackState, path: &Path, start_sec: f64) -> Result<f64> {
     if !playback_has_audio(state) || playback_is_ended(state) {
         playback_start_from(state, path, start_sec)?;
@@ -1729,6 +2299,7 @@ fn playback_toggle_pause(state: &mut PlaybackState, path: &Path, start_sec: f64)
     bail!("playback state unavailable")
 }
 
+#[cfg(not(target_os = "linux"))]
 fn playback_seek_relative(state: &mut PlaybackState, delta: f64, growth: f64) -> Result<f64> {
     let path = if let Some(path) = state.audio_path.clone() {
         path
@@ -1754,4 +2325,83 @@ fn playback_seek_relative(state: &mut PlaybackState, delta: f64, growth: f64) ->
     let target = (cur + step).max(0.0);
     playback_start_from(state, &path, target)?;
     Ok(target)
+}
+
+#[cfg(target_os = "linux")]
+fn playback_current_time(state: &PlaybackState) -> f64 {
+    state.snapshot().current_sec
+}
+
+#[cfg(target_os = "linux")]
+fn playback_has_audio(state: &PlaybackState) -> bool {
+    state.snapshot().loaded
+}
+
+#[cfg(target_os = "linux")]
+fn playback_is_ended(state: &PlaybackState) -> bool {
+    state.snapshot().ended
+}
+
+#[cfg(target_os = "linux")]
+fn playback_apply_speed(state: &mut PlaybackState) {
+    let _ = state.set_speed(state.speed);
+}
+
+#[cfg(target_os = "linux")]
+fn playback_start_from(
+    state: &mut PlaybackState,
+    audio_path: &Path,
+    start_sec: f64,
+) -> Result<()> {
+    state.play_at(normalize_playback_path(audio_path), start_sec)
+}
+
+#[cfg(target_os = "linux")]
+fn playback_has_loaded_path(state: &PlaybackState, path: &Path) -> bool {
+    let snapshot = state.snapshot();
+    snapshot.loaded
+        && snapshot
+            .path
+            .as_ref()
+            .map(|loaded| playback_paths_equal(loaded, path))
+            .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn playback_toggle_pause(
+    state: &mut PlaybackState,
+    path: &Path,
+    start_sec: f64,
+) -> Result<f64> {
+    let snapshot = state.snapshot();
+    if !snapshot.loaded || snapshot.ended {
+        state.play_at(normalize_playback_path(path), start_sec)?;
+    } else {
+        state.toggle()?;
+    }
+    Ok(snapshot.current_sec)
+}
+
+#[cfg(target_os = "linux")]
+fn playback_seek_relative(
+    state: &mut PlaybackState,
+    delta: f64,
+    growth: f64,
+) -> Result<f64> {
+    let now = Instant::now();
+    let step = if let Some(last) = state.last_seek_hotkey_at {
+        if now.duration_since(last) < Duration::from_millis(800) {
+            state.seek_repeat_count = state.seek_repeat_count.saturating_add(1);
+            delta * (1.0 + state.seek_repeat_count as f64 * growth.max(0.0))
+        } else {
+            state.seek_repeat_count = 0;
+            delta
+        }
+    } else {
+        delta
+    };
+    state.last_seek_hotkey_at = Some(now);
+    let current = state.snapshot().current_sec;
+    state.seek_relative(step)?;
+    Ok((current + step).max(0.0))
 }

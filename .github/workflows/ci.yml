@@ -1,10 +1,10 @@
-name: Build Matrix
+name: Build Linux
 
 on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: "Publish GitHub Release assets after build"
+        description: "Publish GitHub Release assets after the Linux build"
         required: false
         default: false
         type: boolean
@@ -14,166 +14,38 @@ on:
         default: true
         type: boolean
       release_tag:
-        description: "Optional explicit tag (X.Y or X.Y.Z, optional v prefix). Empty = auto-generated."
+        description: "Release tag (X.Y or X.Y.Z). Empty uses the Cargo package version."
         required: false
         default: ""
         type: string
       release_name:
-        description: "Release title. Empty = tag"
+        description: "Release title. Empty uses the release tag."
         required: false
         default: ""
         type: string
-      include_ubuntu:
-        description: "Include Ubuntu .deb build in this release"
+      non_linux_source_tag:
+        description: "Existing release tag to copy Windows/macOS assets from. Empty uses the latest published release."
         required: false
-        default: false
-        type: boolean
+        default: ""
+        type: string
 
 jobs:
-  build:
-    name: ${{ matrix.label }}
-    runs-on: ${{ matrix.runs_on }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: windows-x64
-            runs_on: windows-latest
-            target: x86_64-pc-windows-msvc
-            bundle_dir: artifacts/bundles/transcribe-offline-windows-x64
-          - label: macos-arm64
-            runs_on: macos-14
-            target: aarch64-apple-darwin
-            bundle_dir: artifacts/bundles/transcribe-offline-macos-arm64
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libasound2-dev \
-            libudev-dev \
-            libx11-dev \
-            libxi-dev \
-            libxcursor-dev \
-            libxrandr-dev \
-            libxinerama-dev \
-            libxkbcommon-dev \
-            libwayland-dev
-
-      - name: Install LLVM (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          if (Get-Command winget -ErrorAction SilentlyContinue) {
-            winget install --id LLVM.LLVM --source winget --accept-source-agreements --accept-package-agreements --silent
-          } else {
-            choco install llvm -y
-          }
-          $clang = Get-ChildItem "C:\Program Files\LLVM" -Recurse -Filter libclang.dll -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $clang) {
-            throw "libclang.dll not found after LLVM install."
-          }
-          Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$($clang.DirectoryName)"
-          Add-Content -Path $env:GITHUB_PATH -Value "$($clang.DirectoryName)"
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Verify bundled license docs are committed
-        shell: pwsh
-        run: |
-          $required = @(
-            "licenses/THIRD_PARTY_NOTICES_ALL.md",
-            "licenses/THIRD_PARTY_LICENSES_ALL.md",
-            "licenses/ENGINE_THIRD_PARTY_LICENSES_FULL.md"
-          )
-          foreach ($path in $required) {
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-              throw "Missing required bundled license document: $path"
-            }
-            $item = Get-Item -LiteralPath $path
-            if ($item.Length -le 0) {
-              throw "Bundled license document is empty: $path"
-            }
-          }
-          Write-Host "Bundled license documents are present."
-
-      - name: Verify bundled notices content
-        shell: pwsh
-        run: |
-          $notices = Get-Content -LiteralPath "licenses/THIRD_PARTY_NOTICES_ALL.md" -Raw
-          $required = @(
-            "Voxtral-Mini-4B-Realtime-2602",
-            "diar_streaming_sortformer_4spk-v2.1",
-            "Qwen3.5-9B-GGUF"
-          )
-          foreach ($needle in $required) {
-            if (-not $notices.Contains($needle)) {
-              throw "Bundled notices missing required current model reference: $needle"
-            }
-          }
-          $forbidden = @(
-            "speaker-diarization-community-1",
-            "Wespeaker",
-            "pyannote/speaker-diarization-community-1"
-          )
-          foreach ($needle in $forbidden) {
-            if ($notices.Contains($needle)) {
-              throw "Bundled notices still contain stale model reference: $needle"
-            }
-          }
-          Write-Host "Bundled notices content matches current model stack."
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          .\build\package-win-x64.ps1 `
-            -BundleDir "${{ matrix.bundle_dir }}" `
-            -TargetTriple "${{ matrix.target }}" `
-            -Locked
-
-      - name: Package (macOS/Linux)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          chmod +x ./build/package-unix.sh
-          ./build/package-unix.sh \
-            --bundle-dir "${{ matrix.bundle_dir }}" \
-            --target "${{ matrix.target }}" \
-            --locked
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.label }}
-          path: ${{ matrix.bundle_dir }}
-          if-no-files-found: error
-          retention-days: 14
-
-  build-ubuntu:
-    if: ${{ inputs.include_ubuntu }}
-    name: ubuntu-x64
+  build-linux:
+    name: linux-x64-deb
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Linux dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             pkg-config \
+            dpkg-dev \
+            desktop-file-utils \
+            alsa-utils \
             libasound2-dev \
             libudev-dev \
             libx11-dev \
@@ -182,375 +54,219 @@ jobs:
             libxrandr-dev \
             libxinerama-dev \
             libxkbcommon-dev \
-            libwayland-dev
+            libwayland-dev \
+            libgl1-mesa-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
 
-      - name: Verify bundled license docs are committed
-        shell: pwsh
-        run: |
-          $required = @(
-            "licenses/THIRD_PARTY_NOTICES_ALL.md",
-            "licenses/THIRD_PARTY_LICENSES_ALL.md",
-            "licenses/ENGINE_THIRD_PARTY_LICENSES_FULL.md"
-          )
-          foreach ($path in $required) {
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-              throw "Missing required bundled license document: $path"
-            }
-            $item = Get-Item -LiteralPath $path
-            if ($item.Length -le 0) {
-              throw "Bundled license document is empty: $path"
-            }
-          }
-          Write-Host "Bundled license documents are present."
-
-      - name: Verify bundled notices content
-        shell: pwsh
-        run: |
-          $notices = Get-Content -LiteralPath "licenses/THIRD_PARTY_NOTICES_ALL.md" -Raw
-          $required = @(
-            "Voxtral-Mini-4B-Realtime-2602",
-            "diar_streaming_sortformer_4spk-v2.1",
-            "Qwen3.5-9B-GGUF"
-          )
-          foreach ($needle in $required) {
-            if (-not $notices.Contains($needle)) {
-              throw "Bundled notices missing required current model reference: $needle"
-            }
-          }
-          $forbidden = @(
-            "speaker-diarization-community-1",
-            "Wespeaker",
-            "pyannote/speaker-diarization-community-1"
-          )
-          foreach ($needle in $forbidden) {
-            if ($notices.Contains($needle)) {
-              throw "Bundled notices still contain stale model reference: $needle"
-            }
-          }
-          Write-Host "Bundled notices content matches current model stack."
-
-      - name: Package (Ubuntu)
+      - name: Verify bundled legal documents
         shell: bash
         run: |
-          chmod +x ./build/package-unix.sh
-          ./build/package-unix.sh \
-            --bundle-dir "artifacts/bundles/transcribe-offline-ubuntu-x64" \
-            --target "x86_64-unknown-linux-gnu" \
-            --locked
+          set -euo pipefail
+          for path in \
+            licenses/THIRD_PARTY_NOTICES_ALL.md \
+            licenses/THIRD_PARTY_LICENSES_ALL.md \
+            licenses/ENGINE_THIRD_PARTY_LICENSES_FULL.md; do
+            test -s "$path"
+          done
 
-      - name: Upload artifact
+      - name: Run complete Linux test suite
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-test-target
+        run: cargo test --locked
+
+      - name: Build Debian package
+        shell: bash
+        run: |
+          chmod +x build/package-linux-deb.sh
+          build/package-linux-deb.sh \
+            --output-dir "$GITHUB_WORKSPACE/artifacts/deb" \
+            --target-dir "${{ runner.temp }}/cargo-release-target"
+
+      - name: Verify Debian package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="$(find artifacts/deb -maxdepth 1 -name '*.deb' -print -quit)"
+          test -n "$deb"
+          test "$(dpkg-deb -f "$deb" Package)" = "transcribe-offline"
+          test "$(dpkg-deb -f "$deb" Architecture)" = "amd64"
+          depends="$(dpkg-deb -f "$deb" Depends)"
+          grep -qw openresearchtools-engine <<<"$depends"
+          grep -qw openresearchtools-engine-cuda <<<"$depends"
+          grep -qw alsa-utils <<<"$depends"
+          package_root="${RUNNER_TEMP}/transcribe-offline-package"
+          dpkg-deb --extract "$deb" "$package_root"
+          desktop="$package_root/usr/share/applications/transcribe-offline.desktop"
+          test -x "$package_root/usr/lib/transcribe-offline/transcribe-offline"
+          test -L "$package_root/usr/bin/transcribe-offline"
+          test "$(readlink "$package_root/usr/bin/transcribe-offline")" = \
+            "../lib/transcribe-offline/transcribe-offline"
+          test -s "$package_root/usr/share/icons/hicolor/256x256/apps/transcribe-offline.png"
+          grep -Fx 'Name=Transcribe Offline' "$desktop"
+          grep -Fx 'Exec=transcribe-offline' "$desktop"
+          grep -Fx 'Icon=transcribe-offline' "$desktop"
+          grep -Fx 'StartupWMClass=transcribe-offline' "$desktop"
+          grep -Fx 'Categories=AudioVideo;Audio;' "$desktop"
+          if grep -q '^MimeType=' "$desktop"; then
+            echo "Do not advertise MIME ownership until command-line file activation is implemented." >&2
+            exit 1
+          fi
+          desktop-file-validate "$desktop"
+          if dpkg-deb --contents "$deb" | grep -q '/opt/openresearchtools/engine/'; then
+            echo "The app package must not bundle an engine runtime." >&2
+            exit 1
+          fi
+
+      - name: Upload Linux Debian package
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu-x64
-          path: artifacts/bundles/transcribe-offline-ubuntu-x64
+          name: linux-x64-deb
+          path: artifacts/deb/*.deb
           if-no-files-found: error
           retention-days: 14
 
   release:
     name: Publish Release Assets
-    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.publish_release == true && needs.build.result == 'success' && (needs['build-ubuntu'].result == 'success' || needs['build-ubuntu'].result == 'skipped') }}
-    needs:
-      - build
-      - build-ubuntu
+    if: ${{ inputs.publish_release == true }}
+    needs: build-linux
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - name: Download windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-x64
-          path: release-input/windows-x64
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Download macos artifact
+      - name: Download Linux package
         uses: actions/download-artifact@v4
         with:
-          name: macos-arm64
-          path: release-input/macos-arm64
-
-      - name: Download ubuntu artifact
-        if: ${{ inputs.include_ubuntu }}
-        uses: actions/download-artifact@v4
-        with:
-          name: ubuntu-x64
-          path: release-input/ubuntu-x64
+          name: linux-x64-deb
+          path: release-input/linux
 
       - name: Resolve release metadata
         id: meta
         uses: actions/github-script@v7
         with:
           script: |
-            const manualTagRaw = `${{ inputs.release_tag }}`.trim();
-            const manualNameRaw = `${{ inputs.release_name }}`.trim();
-            const isPrerelease = `${{ inputs.prerelease }}` === "true";
-
-            const normalize = (tag) =>
-              String(tag || "")
-                .trim()
-                .replace(/^refs\/tags\//, "")
-                .replace(/^v/, "");
-
-            const parseVersion = (tag) => {
-              const t = normalize(tag);
-              const m = t.match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?$/);
-              if (!m) return null;
-              return {
-                major: Number.parseInt(m[1], 10),
-                minor: Number.parseInt(m[2] ?? "0", 10),
-                patch: Number.parseInt(m[3] ?? "0", 10),
-              };
-            };
-
-            const cmp = (a, b) =>
-              a.major - b.major || a.minor - b.minor || a.patch - b.patch;
-
-            const tags = await github.paginate(github.rest.repos.listTags, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              per_page: 100,
-            });
-            const releases = await github.paginate(github.rest.repos.listReleases, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              per_page: 100,
-            });
-
-            const existingTagNames = new Set(tags.map((t) => normalize(t.name)));
-            const stableVersions = releases
-              .filter((r) => !r.draft && !r.prerelease)
-              .map((r) => parseVersion(r.tag_name))
-              .filter(Boolean)
-              .sort(cmp);
-
-            let tag;
-            let version;
-
-            if (manualTagRaw.length > 0) {
-              tag = normalize(manualTagRaw);
-              version = parseVersion(tag);
-              if (!version) {
-                core.setFailed(
-                  `Invalid release_tag '${manualTagRaw}'. Use X.Y or X.Y.Z (optional v prefix).`,
-                );
-                return;
-              }
-            } else {
-              const latestStable =
-                stableVersions.length > 0
-                  ? stableVersions[stableVersions.length - 1]
-                  : null;
-
-              if (isPrerelease) {
-                const baseMajor = latestStable ? latestStable.major : 1;
-                const baseMinor = latestStable ? latestStable.minor + 1 : 0;
-                const usedPatches = tags
-                  .map((t) => parseVersion(t.name))
-                  .filter((v) => v && v.major === baseMajor && v.minor === baseMinor)
-                  .map((v) => v.patch);
-                const nextPatch =
-                  usedPatches.length > 0 ? Math.max(...usedPatches) + 1 : 0;
-                version = { major: baseMajor, minor: baseMinor, patch: nextPatch };
-                tag = `${version.major}.${version.minor}.${version.patch}`;
-              } else {
-                let major = 1;
-                let minor = 0;
-                if (latestStable) {
-                  major = latestStable.major;
-                  minor = latestStable.minor + 1;
-                }
-                tag = `${major}.${minor}`;
-                while (existingTagNames.has(tag)) {
-                  minor += 1;
-                  tag = `${major}.${minor}`;
-                }
-                version = { major, minor, patch: 0 };
-              }
+            const fs = require("fs");
+            const cargo = fs.readFileSync("Cargo.toml", "utf8");
+            const packageVersion = cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+            const requested = `${{ inputs.release_tag }}`.trim();
+            const tag = (requested || packageVersion || "").replace(/^v/, "");
+            const match = tag.match(/^(\d+)\.(\d+)(?:\.(\d+))?$/);
+            if (!match) {
+              core.setFailed(`Invalid release tag/version '${tag}'. Use X.Y or X.Y.Z.`);
+              return;
             }
-
-            const releaseName = manualNameRaw.length > 0 ? manualNameRaw : tag;
-            const fullVersion = `${version.major}.${version.minor}.${version.patch}`;
-
+            const version = `${match[1]}.${match[2]}.${match[3] || "0"}`;
+            const requestedName = `${{ inputs.release_name }}`.trim();
             core.setOutput("tag", tag);
-            core.setOutput("name", releaseName);
-            core.setOutput("version", fullVersion);
-            core.notice(
-              `Resolved release tag '${tag}' (version ${fullVersion}, prerelease=${isPrerelease}).`,
-            );
+            core.setOutput("version", version);
+            core.setOutput("name", requestedName || tag);
 
-      - name: Prepare release files
+      - name: Carry forward Windows and macOS assets
+        id: carry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SOURCE_TAG: ${{ inputs.non_linux_source_tag }}
         shell: bash
         run: |
           set -euo pipefail
+          source_tag="$REQUESTED_SOURCE_TAG"
+          if [[ -z "$source_tag" ]]; then
+            source_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          fi
+          if [[ "${source_tag#v}" == '${{ steps.meta.outputs.tag }}' ]]; then
+            echo "The carried-asset source must be the previous release, not the target release." >&2
+            exit 1
+          fi
           mkdir -p release-assets
-          version="${{ steps.meta.outputs.version }}"
+          gh release download "$source_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir release-assets \
+            --pattern 'Transcribe-Offline-windows-x64.exe' \
+            --pattern 'transcribe-offline-macos-arm64.dmg' \
+            --clobber
+          test -s release-assets/Transcribe-Offline-windows-x64.exe
+          test -s release-assets/transcribe-offline-macos-arm64.dmg
+          {
+            echo "NON_LINUX_WINDOWS_SHA256=$(sha256sum release-assets/Transcribe-Offline-windows-x64.exe | awk '{print $1}')"
+            echo "NON_LINUX_MACOS_SHA256=$(sha256sum release-assets/transcribe-offline-macos-arm64.dmg | awk '{print $1}')"
+          } >> "$GITHUB_ENV"
+          echo "source_tag=$source_tag" >> "$GITHUB_OUTPUT"
 
-          if [[ -f "release-input/windows-x64/Transcribe Offline.exe" ]]; then
-            cp "release-input/windows-x64/Transcribe Offline.exe" \
-              "release-assets/Transcribe-Offline-windows-x64.exe"
-          else
-            echo "Missing windows executable in artifact." >&2
-            exit 1
-          fi
-
-          if [[ -f "release-input/macos-arm64/transcribe-offline-macos-arm64.dmg" ]]; then
-            cp "release-input/macos-arm64/transcribe-offline-macos-arm64.dmg" \
-              "release-assets/transcribe-offline-macos-arm64.dmg"
-          else
-            echo "Missing macOS DMG in artifact." >&2
-            exit 1
-          fi
-
-          if [[ "${{ inputs.include_ubuntu }}" == "true" ]]; then
-            if [[ ! -f "release-input/ubuntu-x64/transcribe-offline" ]]; then
-              echo "Missing Ubuntu binary in artifact (release-input/ubuntu-x64/transcribe-offline)." >&2
-              exit 1
-            fi
-            if [[ ! -d "release-input/ubuntu-x64/runtime-manifests" ]]; then
-              echo "Missing Ubuntu runtime manifests in artifact." >&2
-              exit 1
-            fi
-
-            deb_root="release-work/ubuntu-deb"
-            install_root="${deb_root}/usr/lib/transcribe-offline"
-            mkdir -p "${install_root}" \
-              "${deb_root}/usr/bin" \
-              "${deb_root}/usr/share/applications" \
-              "${deb_root}/usr/share/icons/hicolor/256x256/apps" \
-              "${deb_root}/DEBIAN"
-
-            cp -a release-input/ubuntu-x64/. "${install_root}/"
-            rm -f "${install_root}/install-ubuntu.sh" "${install_root}/uninstall-ubuntu.sh"
-            chmod 0755 "${install_root}/transcribe-offline" || true
-
-            printf '%s\n' \
-              '#!/usr/bin/env bash' \
-              'set -euo pipefail' \
-              'exec /usr/lib/transcribe-offline/transcribe-offline "$@"' \
-              > "${deb_root}/usr/bin/transcribe-offline"
-            chmod 0755 "${deb_root}/usr/bin/transcribe-offline"
-
-            if [[ -f "${install_root}/transcribe-offline.png" ]]; then
-              cp "${install_root}/transcribe-offline.png" \
-                "${deb_root}/usr/share/icons/hicolor/256x256/apps/transcribe-offline.png"
-            fi
-
-            printf '%s\n' \
-              '[Desktop Entry]' \
-              'Type=Application' \
-              'Name=Transcribe Offline' \
-              'Comment=Offline transcription and diarization GUI powered by Openresearchtools-Engine' \
-              'Exec=transcribe-offline' \
-              'Icon=transcribe-offline' \
-              'StartupWMClass=transcribe-offline' \
-              'Terminal=false' \
-              'Categories=AudioVideo;Utility;' \
-              'StartupNotify=true' \
-              > "${deb_root}/usr/share/applications/transcribe-offline.desktop"
-
-            printf '%s\n' \
-              'Package: transcribe-offline' \
-              "Version: ${version}" \
-              'Section: audio' \
-              'Priority: optional' \
-              'Architecture: amd64' \
-              'Maintainer: L. Rutkauskas' \
-              'Depends: libasound2, libx11-6, libxkbcommon0, libwayland-client0' \
-              'Description: Offline transcription, diarization, and chat desktop GUI' \
-              ' Native desktop wrapper around Openresearchtools-Engine runtime.' \
-              > "${deb_root}/DEBIAN/control"
-
-            deb_asset="transcribe-offline_${version}_amd64.deb"
-            dpkg-deb --build --root-owner-group "${deb_root}" "release-assets/${deb_asset}"
-          fi
-
-          (cd release-assets && sha256sum * > SHA256SUMS.txt)
-
-          ls -la release-assets
+      - name: Prepare versioned Linux package and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          input_deb="$(find release-input/linux -maxdepth 1 -name '*.deb' -print -quit)"
+          test -n "$input_deb"
+          extract_root="${RUNNER_TEMP}/transcribe-offline-deb-extract"
+          dpkg-deb --extract "$input_deb" "$extract_root"
+          chmod +x build/package-linux-deb.sh
+          build/package-linux-deb.sh \
+            --binary "$extract_root/usr/lib/transcribe-offline/transcribe-offline" \
+            --version "${{ steps.meta.outputs.version }}" \
+            --output-dir "$GITHUB_WORKSPACE/release-assets" \
+            --target-dir "${RUNNER_TEMP}/unused-cargo-target"
+          (cd release-assets && sha256sum \
+            Transcribe-Offline-windows-x64.exe \
+            transcribe-offline-macos-arm64.dmg \
+            "transcribe-offline_${{ steps.meta.outputs.version }}_amd64.deb" \
+            > SHA256SUMS.txt)
 
       - name: Build release page body
         shell: bash
         run: |
           set -euo pipefail
-
           tag="${{ steps.meta.outputs.tag }}"
           version="${{ steps.meta.outputs.version }}"
-          repo="${GITHUB_REPOSITORY}"
-          base_url="https://github.com/${repo}/releases/download/${tag}"
-
-          win_asset="Transcribe-Offline-windows-x64.exe"
-          mac_asset="transcribe-offline-macos-arm64.dmg"
+          source_tag="${{ steps.carry.outputs.source_tag }}"
+          base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
           linux_asset="transcribe-offline_${version}_amd64.deb"
-          sums_asset="SHA256SUMS.txt"
-
-          win_url="${base_url}/${win_asset}"
-          mac_url="${base_url}/${mac_asset}"
-          linux_url="${base_url}/${linux_asset}"
-          sums_url="${base_url}/${sums_asset}"
-          ubuntu_download_line=""
-          ubuntu_install_section=""
-
-          if [[ "${{ inputs.include_ubuntu }}" == "true" ]]; then
-            ubuntu_download_line="- Ubuntu x64 (.deb): [\`${linux_asset}\`](${linux_url})"
-            ubuntu_install_section="$(printf '%s\n' \
-              '## Ubuntu Quick Install (.deb)' \
-              '' \
-              'This command downloads the Ubuntu package from this release and installs it system-wide:' \
-              '- App menu entry: \`Transcribe Offline\`' \
-              '- Launcher command: \`transcribe-offline\`' \
-              '' \
-              '\`\`\`bash' \
-              "curl -fL '${linux_url}' -o /tmp/${linux_asset} && \\\\" \
-              "sudo apt install -y /tmp/${linux_asset}" \
-              '\`\`\`')"
-          fi
 
           cat > release-body.md <<RELEASE_BODY
           ## Downloads
 
-          - Windows x64*: [\`${win_asset}\`](${win_url})
-          - macOS arm64*: [\`${mac_asset}\`](${mac_url})
-          ${ubuntu_download_line}
-          - Checksums: [\`${sums_asset}\`](${sums_url})
+          - Linux x64: [\`${linux_asset}\`](${base_url}/${linux_asset})
+          - Windows x64*: [\`Transcribe-Offline-windows-x64.exe\`](${base_url}/Transcribe-Offline-windows-x64.exe)
+          - macOS arm64*: [\`transcribe-offline-macos-arm64.dmg\`](${base_url}/transcribe-offline-macos-arm64.dmg)
+          - Checksums: [\`SHA256SUMS.txt\`](${base_url}/SHA256SUMS.txt)
 
-          ## Unsigned Build Notice
+          \* Windows and macOS binaries are carried forward unchanged from release \`${source_tag}\`.
 
-          This app is an open-source hobby development effort by the repository owner. We do not currently have funding for full paid code-signing and notarization pipelines across all platforms/releases.
+          ## Linux install
 
-          Because of that, operating-system protections or hardened security environments (for example Windows SmartScreen, enterprise endpoint controls, or macOS Gatekeeper policies) may block unsigned binaries.
+          The Linux app package depends on both APT-managed engine variants:
+          \`openresearchtools-engine\` (Vulkan) and \`openresearchtools-engine-cuda\` (CUDA).
+          With the OpenResearchTools APT repository configured, install with:
 
-          If your environment blocks unsigned binaries, the recommended path is:
-          1. Build this desktop app from source on the target device.
-          2. Build Openresearchtools-Engine from source on the same target device.
-          3. Use those locally-built artifacts in your deployment.
+          \`\`\`bash
+          sudo apt install "./${linux_asset}"
+          \`\`\`
 
-          ### Windows (when blocked)
+          The Vulkan/CUDA selector in Settings uses the corresponding installed runtime under
+          \`/opt/openresearchtools/engine/vulkan\` or \`/opt/openresearchtools/engine/cuda\`.
+          Linux never downloads or replaces the engine from inside the app.
 
-          If SmartScreen shows "Windows protected your PC", use More info -> Run anyway only if your policy allows it.
+          ## Unsigned build notice
 
-          In the app, go to Settings -> Runtime Setup and run:
-          1. Download/Repair runtime
-          2. Unblock unsigned runtime
-          3. Recheck
-
-          The Windows unblock script clears Mark-of-the-Web flags in the selected runtime directory by running \`Unblock-File\` recursively on runtime files.
-
-          ### macOS (when blocked)
-
-          Try Right click -> Open on first launch.
-
-          If blocked by Gatekeeper, use System Settings -> Privacy & Security -> Open Anyway when available and policy permits.
-
-          In the app, after runtime install/repair, click Unblock unsigned runtime then Recheck.
-
-          The macOS unblock script removes quarantine attributes recursively (\`xattr -dr com.apple.quarantine\`) and restores executable bits for runtime binaries/scripts where needed (\`chmod +x\` on relevant files).
-
-          ${ubuntu_install_section}
+          These artifacts may be unsigned. Review checksums and your local security policy before use.
           RELEASE_BODY
+
+      - name: Verify retained assets are byte-for-byte preserved
+        shell: bash
+        run: |
+          set -euo pipefail
+          windows_sha="$(sha256sum release-assets/Transcribe-Offline-windows-x64.exe | awk '{print $1}')"
+          macos_sha="$(sha256sum release-assets/transcribe-offline-macos-arm64.dmg | awk '{print $1}')"
+          test "$windows_sha" = "$NON_LINUX_WINDOWS_SHA256"
+          test "$macos_sha" = "$NON_LINUX_MACOS_SHA256"
+          echo "Windows asset preserved byte-for-byte: $windows_sha"
+          echo "macOS asset preserved byte-for-byte: $macos_sha"
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
