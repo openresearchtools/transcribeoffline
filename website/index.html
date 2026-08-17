@@ -53,8 +53,8 @@
       <section id="downloads" class="shell section downloads" aria-label="Downloads">
         <div class="download-box">
           <div class="download-copy">
-            <h2>Transcribe Offline v2.0</h2>
-            <p>Download unsigned desktop builds for MacOS arm64 and Windows x64, or use the source code for local builds and institutional deployments.</p>
+            <h2>Transcribe Offline v2.1</h2>
+            <p>Install the Linux amd64 package through APT, download unsigned desktop builds for MacOS arm64 and Windows x64, or use the source code for local builds and institutional deployments.</p>
             <div class="inline-notice overlay-host" data-overlay-host>
               <p>* Unsigned Build Notice - Transcribe Offline is an open-source hobby development effort by the repository owner. Paid code-signing and notarisation pipelines are not currently in place, so Windows SmartScreen, enterprise endpoint controls, or MacOS Gatekeeper may block downloaded binaries. <a class="inline-link overlay-trigger" href="#unsigned-build-overlay" aria-expanded="false" aria-controls="unsigned-build-overlay">Learn more</a></p>
               <div class="overlay overlay--down" id="unsigned-build-overlay" role="dialog" aria-label="Unsigned build guidance">
@@ -76,11 +76,15 @@
             </div>
           </div>
           <div class="download-actions" role="group" aria-label="Download links">
-            <a class="download-link" href="https://github.com/openresearchtools/transcribeoffline/releases/download/2.0/transcribe-offline-macos-arm64.dmg">
+            <button class="download-link" type="button" data-open-dialog="linux-install-dialog">
+              <strong>Linux · Debian/Ubuntu</strong>
+              <span>Install the latest amd64 package through APT</span>
+            </button>
+            <a class="download-link" href="https://github.com/openresearchtools/transcribeoffline/releases/download/2.1/transcribe-offline-macos-arm64.dmg">
               <strong>MacOS arm64</strong>
               <span>transcribe-offline-macos-arm64.dmg</span>
             </a>
-            <a class="download-link" href="https://github.com/openresearchtools/transcribeoffline/releases/download/2.0/Transcribe-Offline-windows-x64.exe">
+            <a class="download-link" href="https://github.com/openresearchtools/transcribeoffline/releases/download/2.1/Transcribe-Offline-windows-x64.exe">
               <strong>Windows x64</strong>
               <span>Transcribe-Offline-windows-x64.exe</span>
             </a>
@@ -92,6 +96,35 @@
         </div>
       </section>
     </main>
+
+    <dialog class="install-dialog" id="linux-install-dialog" aria-labelledby="linux-install-title">
+      <div class="dialog-heading">
+        <div>
+          <p class="dialog-label">Debian 13+ · Ubuntu 24.04/26.04+ · amd64</p>
+          <h2 id="linux-install-title">Install Transcribe Offline</h2>
+        </div>
+        <button class="dialog-close" type="button" data-close-dialog aria-label="Close install instructions">&times;</button>
+      </div>
+
+      <section class="install-option">
+        <h3>First Open Research Tools install</h3>
+        <p>Add the signed repository and install the application with one command.</p>
+        <div class="code-block">
+          <button class="copy-button" type="button" data-copy="transcribe-first-install">Copy</button>
+          <pre><code id="transcribe-first-install">wget -qO /tmp/openresearchtools-archive-keyring.deb https://apt.openresearchtools.com/apt/releases/download/repo/openresearchtools-archive-keyring.deb &amp;&amp; sudo apt install -y /tmp/openresearchtools-archive-keyring.deb &amp;&amp; sudo apt update &amp;&amp; sudo apt install -y transcribe-offline</code></pre>
+        </div>
+      </section>
+
+      <section class="install-option">
+        <h3>Repository already configured</h3>
+        <p>If another Open Research Tools package has already added the repository:</p>
+        <div class="code-block">
+          <button class="copy-button" type="button" data-copy="transcribe-apt-install">Copy</button>
+          <pre><code id="transcribe-apt-install">sudo apt install transcribe-offline</code></pre>
+        </div>
+      </section>
+      <p class="dialog-note">APT installs the required Vulkan and CUDA Engine packages automatically.</p>
+    </dialog>
 
     <footer class="footer" aria-label="Site footer">
       <div class="shell footer-inner">
@@ -168,6 +201,74 @@
           if (event.key === "Escape") {
             closeAll(null);
           }
+        });
+      })();
+
+      (function () {
+        var dialogs = new Map(
+          Array.prototype.map.call(document.querySelectorAll("dialog"), function (dialog) {
+            return [dialog.id, dialog];
+          })
+        );
+
+        document.querySelectorAll("[data-open-dialog]").forEach(function (button) {
+          button.addEventListener("click", function () {
+            var dialog = dialogs.get(button.dataset.openDialog);
+            if (dialog) {
+              dialog.showModal();
+            }
+          });
+        });
+
+        document.querySelectorAll("[data-close-dialog]").forEach(function (button) {
+          button.addEventListener("click", function () {
+            button.closest("dialog").close();
+          });
+        });
+
+        dialogs.forEach(function (dialog) {
+          dialog.addEventListener("click", function (event) {
+            if (event.target === dialog) {
+              dialog.close();
+            }
+          });
+        });
+
+        function copyText(text) {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(text);
+          }
+
+          var field = document.createElement("textarea");
+          field.value = text;
+          field.readOnly = true;
+          field.style.position = "fixed";
+          field.style.opacity = "0";
+          document.body.appendChild(field);
+          field.select();
+          var copied = document.execCommand("copy");
+          field.remove();
+          return copied ? Promise.resolve() : Promise.reject(new Error("Copy failed"));
+        }
+
+        document.querySelectorAll("[data-copy]").forEach(function (button) {
+          button.addEventListener("click", function () {
+            var code = document.getElementById(button.dataset.copy);
+            copyText(code.textContent.trim()).then(function () {
+              button.textContent = "Copied";
+              button.classList.add("copied");
+              window.setTimeout(function () {
+                button.textContent = "Copy";
+                button.classList.remove("copied");
+              }, 1600);
+            }).catch(function () {
+              var range = document.createRange();
+              range.selectNodeContents(code);
+              window.getSelection().removeAllRanges();
+              window.getSelection().addRange(range);
+              button.textContent = "Selected";
+            });
+          });
         });
       })();
     </script>

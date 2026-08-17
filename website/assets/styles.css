@@ -45,6 +45,10 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+body:has(dialog[open]) {
+  overflow: hidden;
+}
+
 body::before {
   content: "";
   position: fixed;
@@ -259,6 +263,7 @@ h1 {
 }
 
 .download-link {
+  width: 100%;
   display: grid;
   gap: 0.14rem;
   padding: 0.88rem 0.96rem;
@@ -266,7 +271,10 @@ h1 {
   border-radius: 15px;
   background: rgba(255, 255, 255, 0.72);
   color: inherit;
+  font: inherit;
+  text-align: left;
   text-decoration: none;
+  cursor: pointer;
   transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
 }
 
@@ -289,6 +297,138 @@ h1 {
 
 .download-link--muted {
   background: rgba(255, 255, 255, 0.52);
+}
+
+.install-dialog {
+  width: min(780px, calc(100% - 2rem));
+  max-height: calc(100svh - 2rem);
+  overflow: auto;
+  border: 1px solid rgba(17, 28, 39, 0.16);
+  border-radius: var(--radius);
+  padding: clamp(1.2rem, 4vw, 2rem);
+  background: #f9fbfb;
+  color: var(--text);
+  box-shadow: 0 34px 90px -36px rgba(17, 28, 39, 0.72);
+}
+
+.install-dialog::backdrop {
+  background: rgba(17, 28, 39, 0.58);
+  backdrop-filter: blur(7px);
+}
+
+.dialog-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.dialog-label {
+  margin: 0 0 0.35rem;
+  color: var(--accent);
+  font-size: 0.76rem;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.install-dialog h2 {
+  margin: 0;
+  font-size: clamp(1.7rem, 4vw, 2.4rem);
+  line-height: 1.1;
+  letter-spacing: -0.035em;
+}
+
+.install-dialog h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.install-dialog p {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.dialog-close {
+  width: 2.5rem;
+  height: 2.5rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--muted);
+  font: inherit;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dialog-close:hover,
+.dialog-close:focus-visible {
+  color: var(--text);
+  border-color: rgba(10, 111, 120, 0.32);
+}
+
+.install-option + .install-option {
+  margin-top: 1.4rem;
+}
+
+.code-block {
+  position: relative;
+}
+
+.code-block pre {
+  margin: 0;
+  overflow-x: auto;
+  border: 1px solid rgba(17, 28, 39, 0.14);
+  border-radius: 12px;
+  padding: 1rem 4.5rem 1rem 1rem;
+  background: #111c27;
+  color: #f5fbfc;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.code-block pre code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+}
+
+.copy-button {
+  position: absolute;
+  top: 0.55rem;
+  right: 0.55rem;
+  z-index: 1;
+  min-width: 3.5rem;
+  border: 1px solid rgba(223, 247, 244, 0.24);
+  border-radius: 8px;
+  padding: 0.36rem 0.56rem;
+  background: #1d303f;
+  color: #dff7f4;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.copy-button:hover,
+.copy-button:focus-visible,
+.copy-button.copied {
+  border-color: var(--accent-soft);
+  color: #fff;
+}
+
+.dialog-note {
+  margin-top: 1.4rem !important;
 }
 
 .inline-link {
@@ -434,6 +574,11 @@ h1 {
     left: 0;
     right: auto;
     width: calc(100vw - 1.2rem);
+  }
+
+  .install-dialog {
+    width: calc(100% - 1rem);
+    max-height: calc(100svh - 1rem);
   }
 }
 

@@ -7,9 +7,24 @@ speaker diarization, and transcript review/edit workflows.
 It is implemented as a native Rust/egui GUI on top of
 [`Openresearchtools-Engine`](https://github.com/openresearchtools/engine).
 
-- Windows x64*: [**Transcribe-Offline.exe**](https://github.com/openresearchtools/transcribeoffline/releases/download/2.0/Transcribe-Offline-windows-x64.exe)
-- macOS arm64*: [**Transcribe-offline.dmg**](https://github.com/openresearchtools/transcribeoffline/releases/download/2.0/transcribe-offline-macos-arm64.dmg)
-- Linux x64: release `.deb` package (`transcribe-offline_<version>_amd64.deb`)
+- Windows x64*: [**Transcribe-Offline.exe**](https://github.com/openresearchtools/transcribeoffline/releases/download/2.1/Transcribe-Offline-windows-x64.exe)
+- macOS arm64*: [**Transcribe-offline.dmg**](https://github.com/openresearchtools/transcribeoffline/releases/download/2.1/transcribe-offline-macos-arm64.dmg)
+- Linux amd64: install `transcribe-offline` through APT.
+
+## Install on Debian 13+ or Ubuntu 24.04/26.04+
+
+For the first Open Research Tools installation on a system, copy and run this
+one command:
+
+```sh
+wget -qO /tmp/openresearchtools-archive-keyring.deb https://apt.openresearchtools.com/apt/releases/download/repo/openresearchtools-archive-keyring.deb && sudo apt install -y /tmp/openresearchtools-archive-keyring.deb && sudo apt update && sudo apt install -y transcribe-offline
+```
+
+If the Open Research Tools APT repository is already configured:
+
+```sh
+sudo apt install transcribe-offline
+```
 
 ### Linux engine packages
 
@@ -20,10 +35,8 @@ depends on both APT packages:
 - `openresearchtools-engine-cuda` for CUDA (`/opt/openresearchtools/engine/cuda`)
 
 The Vulkan/CUDA selector switches directly between those locations. Linux does
-not download, unpack, unblock, or replace the engine from inside the app. Once
-the OpenResearchTools APT repository is configured, `sudo apt install
-./transcribe-offline_<version>_amd64.deb` installs the app and resolves both
-engine dependencies.
+not download, unpack, unblock, or replace the engine from inside the app. The
+APT installation above resolves both engine dependencies automatically.
 
 ## NOW AVAILABLE! Realtime Live Transcription + Live Speaker Diarization
 
