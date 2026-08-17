@@ -228,7 +228,7 @@ For citations and model lineage references, see the bundled Notices document:
 
 Suggested citation:
 
-Rutkauskas, L. (2026). *Transcribe Offline* (Version 2.0.0) [Computer software].
+Rutkauskas, L. (2026). *Transcribe Offline* (Version 2.1.0) [Computer software].
 OpenResearchTools. <https://github.com/openresearchtools/transcribeoffline>.
 
 BibTeX:
@@ -237,7 +237,7 @@ BibTeX:
 @software{Rutkauskas_TranscribeOffline_2026,
   author    = {Rutkauskas, L.},
   title     = {Transcribe Offline},
-  version   = {2.0.0},
+  version   = {2.1.0},
   date      = {2026-03-04},
   url       = {https://github.com/openresearchtools/transcribeoffline},
   publisher = {OpenResearchTools},
