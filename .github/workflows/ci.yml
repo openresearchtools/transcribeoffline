@@ -237,16 +237,32 @@ jobs:
           - Checksums: [\`SHA256SUMS.txt\`](${base_url}/SHA256SUMS.txt)
 
           \* Windows and macOS binaries are carried forward unchanged from release \`${source_tag}\`.
+          RELEASE_BODY
 
-          ## Linux install
+          if [[ "${{ inputs.prerelease }}" != "true" ]]; then
+            cat >> release-body.md <<RELEASE_BODY
 
-          The Linux app package depends on both APT-managed engine variants:
-          \`openresearchtools-engine\` (Vulkan) and \`openresearchtools-engine-cuda\` (CUDA).
-          With the OpenResearchTools APT repository configured, install with:
+          <!-- openresearchtools-apt-install:start -->
+          ## Install on Debian 13+ or Ubuntu 24.04/26.04+ (amd64)
+
+          For the first Open Research Tools installation on this system:
 
           \`\`\`bash
-          sudo apt install "./${linux_asset}"
+          wget -qO /tmp/keyring.deb https://keyring.openresearchtools.com && sudo apt install -y /tmp/keyring.deb && sudo apt update && sudo apt install -y transcribe-offline=${version}
           \`\`\`
+
+          If the Open Research Tools APT repository is already configured:
+
+          \`\`\`bash
+          sudo apt update && sudo apt install -y transcribe-offline=${version}
+          \`\`\`
+
+          APT installs both required Engine variants automatically.
+          <!-- openresearchtools-apt-install:end -->
+          RELEASE_BODY
+          fi
+
+          cat >> release-body.md <<RELEASE_BODY
 
           The Vulkan/CUDA selector in Settings uses the corresponding installed runtime under
           \`/opt/openresearchtools/engine/vulkan\` or \`/opt/openresearchtools/engine/cuda\`.
