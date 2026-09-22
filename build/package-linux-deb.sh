@@ -60,6 +60,8 @@ case "$architecture" in
   *) echo "Unsupported architecture: $architecture" >&2; exit 2 ;;
 esac
 mkdir -p "$output_dir" "$target_dir"
+output_dir="$(realpath "$output_dir")"
+target_dir="$(realpath "$target_dir")"
 if [[ -z "$binary_path" ]]; then
   CARGO_TARGET_DIR="$target_dir" cargo build \
     --manifest-path "$repo_root/Cargo.toml" \
