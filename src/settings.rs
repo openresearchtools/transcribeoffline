@@ -44,6 +44,7 @@ pub struct AppSettings {
     pub speech_custom_mode: String,
     pub diarization_enabled: bool,
     pub whisper_no_gpu: bool,
+    pub whisper_single_candidate: bool,
     pub ffmpeg_convert: bool,
     pub whisper_word_time_offset_sec: String,
     pub chat_model: String,
@@ -98,6 +99,7 @@ impl Default for AppSettings {
             speech_custom_mode: "auto".to_string(),
             diarization_enabled: true,
             whisper_no_gpu: false,
+            whisper_single_candidate: false,
             ffmpeg_convert: true,
             whisper_word_time_offset_sec: "0.73".to_string(),
             chat_model: String::new(),
@@ -239,6 +241,17 @@ mod tests {
         default_live_sessions_dir, default_runtime_dir, legacy_shared_runtime_dir,
         normalize_runtime_dir_alias,
     };
+
+    #[test]
+    fn whisper_compatibility_is_opt_in_and_persists() {
+        let legacy: super::AppSettings = serde_yaml::from_str("mode: speech\n").unwrap();
+        assert!(!legacy.whisper_single_candidate);
+        let mut enabled = legacy;
+        enabled.whisper_single_candidate = true;
+        let saved = serde_yaml::to_string(&enabled).unwrap();
+        let restored: super::AppSettings = serde_yaml::from_str(&saved).unwrap();
+        assert!(restored.whisper_single_candidate);
+    }
 
     #[test]
     fn normalizes_engine_runtime_suffix_windows() {

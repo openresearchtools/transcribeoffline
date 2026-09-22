@@ -5914,6 +5914,14 @@ impl UiApp {
                 ui.label("Runtime/device/models moved to Settings -> Runtime Setup.");
                 engine_panel_frame().show(ui, |ui| {
                     ui.heading("Transcription Tuning");
+                    if ui.checkbox(
+                        &mut self.settings.whisper_single_candidate,
+                        "Mobile GPU compatibility (Whisper)",
+                    ).changed() {
+                        self.queue_save();
+                    }
+                    ui.label("Uses beam size 1 and best-of 1. Some mobile GPUs do not work with larger values. Applies to Whisper with or without speaker diarization.");
+
                     ui.horizontal(|ui| {
                         ui.label("Subtitle custom:");
                         ui.text_edit_singleline(&mut self.settings.subtitle_custom_mode);
@@ -8370,6 +8378,14 @@ mod tests {
         settings.custom_mode = "auto".to_string();
         settings.speech_custom_mode = "auto".to_string();
         settings.diarization_enabled = false;
+        settings.whisper_single_candidate = env::var("TRANSCRIBE_E2E_SINGLE_CANDIDATE")
+            .map(|value| value == "1").unwrap_or(false);
+        if let Ok(directory) = env::var("TRANSCRIBE_E2E_DIARIZATION_DIR") {
+            settings.mode = "transcript".to_string();
+            settings.diarization_enabled = true;
+            settings.diarization_models_dir = directory;
+        }
+        let single_candidate = settings.whisper_single_candidate;
         settings.whisper_no_gpu = false;
         settings.devices = gpu_index.to_string();
         settings.main_gpu = gpu_index;
@@ -8378,6 +8394,7 @@ mod tests {
         let result = run_transcription_with_progress(settings, |stage| stages.push(stage))
             .expect("transcription through isolated app Engine path");
         assert!(result.output_path.is_file());
+        assert_eq!(stages.iter().any(|stage| stage.contains("Whisper mobile GPU compatibility")), single_candidate);
         assert!(
             result
                 .output_text

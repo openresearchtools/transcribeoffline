@@ -135,6 +135,11 @@ where
         .arg("--out")
         .arg(&response_path);
 
+    if settings.whisper_single_candidate {
+        command.args(["--whisper-beam-size", "1", "--whisper-best-of", "1"]);
+        progress("Whisper mobile GPU compatibility: beam size 1, best-of 1".to_string());
+    }
+
     if settings.n_threads > 0 {
         command.arg("--threads").arg(settings.n_threads.to_string());
     }
@@ -367,6 +372,10 @@ where
         "audio_source_path": audio_path.display().to_string(),
         "whisper_model": settings.whisper_model,
     });
+    if settings.whisper_single_candidate {
+        metadata["whisper_beam_size"] = json!(1);
+        metadata["whisper_best_of"] = json!(1);
+    }
     let selected_gpu = selected_gpu_index_from_settings(&settings);
 
     let diarization_enabled = mode_norm == "transcript";

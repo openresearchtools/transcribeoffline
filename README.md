@@ -280,3 +280,14 @@ wget https://github.com/openresearchtools/engine/releases/download/v1.17/engine-
 wget https://github.com/openresearchtools/transcribeoffline/releases/download/2.1.1/transcribe-offline_2.1.1_arm64.deb
 sudo apt install ./engine-arm64.deb ./transcribe-offline_2.1.1_arm64.deb
 ```
+
+### Optional Whisper mobile GPU compatibility
+
+In **Settings → Transcription Settings**, enable **Mobile GPU compatibility
+(Whisper)** if the GPU needs single-candidate decoding. This sets
+`--whisper-beam-size 1 --whisper-best-of 1` on the existing Engine CLI, equivalent
+to `{"whisper_beam_size": 1, "whisper_best_of": 1}`. It applies to Whisper in
+speech, subtitle, and diarized transcript modes. It is off by default, is saved
+in settings, and leaves engine defaults unchanged when disabled. Live Voxtral
+transcription uses a different model and is unaffected. The checkbox is included
+in the new ARM64 build; carried-forward binaries retain their existing UI.
