@@ -6,6 +6,7 @@ output_dir="${repo_root}/../TRANSCRIBEbuilds/linux/deb"
 target_dir="${repo_root}/../TRANSCRIBEbuilds/linux/cargo-target"
 binary_path=""
 package_version=""
+architecture="amd64"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -19,6 +20,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --binary)
       binary_path="${2:-}"
+      shift 2
+      ;;
+    --architecture)
+      architecture="${2:-}"
       shift 2
       ;;
     --version)
@@ -49,20 +54,32 @@ if [[ -z "$package_version" ]]; then
   exit 1
 fi
 
+case "$architecture" in
+  amd64) rust_target="x86_64-unknown-linux-gnu"; engine_depends="openresearchtools-engine, openresearchtools-engine-cuda"; elf_machine="62" ;;
+  arm64) rust_target="aarch64-unknown-linux-gnu"; engine_depends="openresearchtools-engine (>= 1.17)"; elf_machine="183" ;;
+  *) echo "Unsupported architecture: $architecture" >&2; exit 2 ;;
+esac
 mkdir -p "$output_dir" "$target_dir"
 if [[ -z "$binary_path" ]]; then
   CARGO_TARGET_DIR="$target_dir" cargo build \
     --manifest-path "$repo_root/Cargo.toml" \
     --release \
     --locked \
-    --target x86_64-unknown-linux-gnu \
+    --target "$rust_target" \
     --bin transcribe-offline
-  binary_path="$target_dir/x86_64-unknown-linux-gnu/release/transcribe-offline"
+  binary_path="$target_dir/$rust_target/release/transcribe-offline"
 fi
 if [[ ! -x "$binary_path" ]]; then
   echo "Missing executable app binary: $binary_path" >&2
   exit 1
 fi
+
+python3 - "$binary_path" "$elf_machine" <<'CHECK_ELF'
+import sys
+from pathlib import Path
+header = Path(sys.argv[1]).read_bytes()[:20]
+assert header[:5] == b"\x7fELF\x02" and int.from_bytes(header[18:20], "little") == int(sys.argv[2]), "binary architecture does not match package"
+CHECK_ELF
 
 work_root="$(mktemp -d "$output_dir/.transcribe-offline-deb.XXXXXX")"
 trap 'rm -rf "$work_root"' EXIT
@@ -125,13 +142,13 @@ Package: transcribe-offline
 Version: ${package_version}
 Section: sound
 Priority: optional
-Architecture: amd64
+Architecture: ${architecture}
 Maintainer: OpenResearchTools <openresearchtools@users.noreply.github.com>
 Installed-Size: ${installed_size}
-Depends: openresearchtools-engine, openresearchtools-engine-cuda, ${native_depends}, alsa-utils, libudev1, libx11-6, libxcb1, libxkbcommon0, libwayland-client0, xdg-utils
+Depends: ${engine_depends}, ${native_depends}, alsa-utils, libudev1, libx11-6, libxcb1, libxkbcommon0, libwayland-client0, xdg-utils
 Description: Local transcription, diarization, chat, and transcript review
  Native desktop application using the APT-installed Openresearchtools-Engine
- Vulkan or CUDA runtime selected in the application settings.
+ runtime, with automatic Vulkan selection on Linux ARM64.
 CONTROL
 
 find "$package_root" -type d -exec chmod 0755 {} +
@@ -141,6 +158,6 @@ chmod 0644 \
   "$package_root/usr/share/applications/transcribe-offline.desktop" \
   "$package_root/usr/share/icons/hicolor/256x256/apps/transcribe-offline.png"
 
-asset_path="$output_dir/transcribe-offline_${package_version}_amd64.deb"
+asset_path="$output_dir/transcribe-offline_${package_version}_${architecture}.deb"
 dpkg-deb --build --root-owner-group "$package_root" "$asset_path"
 echo "Debian package ready: $asset_path"

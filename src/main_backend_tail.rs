@@ -1625,7 +1625,7 @@ fn configure_ui_startup() {
 fn resolve_runtime_dir(preferred: &Path) -> PathBuf {
     #[cfg(target_os = "linux")]
     {
-        if preferred == Path::new(crate::runtime_installer::LINUX_CUDA_RUNTIME_DIR) {
+        if !cfg!(target_arch = "aarch64") && preferred == Path::new(crate::runtime_installer::LINUX_CUDA_RUNTIME_DIR) {
             return PathBuf::from(crate::runtime_installer::LINUX_CUDA_RUNTIME_DIR);
         }
         return PathBuf::from(crate::runtime_installer::LINUX_VULKAN_RUNTIME_DIR);

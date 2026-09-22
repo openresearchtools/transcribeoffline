@@ -1,0 +1,140 @@
+name: Linux ARM64 Vulkan release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "New release tag (must match Cargo version)"
+        required: true
+        default: "2.1.1"
+        type: string
+      carry_forward_release_tag:
+        description: "Published release supplying unchanged Windows, macOS and Linux AMD64 binaries"
+        required: true
+        default: "2.1"
+        type: string
+      draft:
+        description: "Keep release as a draft for testing"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-arm64-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      VERSION: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version and architecture
+        run: |
+          test "$(dpkg --print-architecture)" = arm64
+          python3 - <<'PY'
+          import os, re, tomllib
+          version = os.environ["VERSION"]
+          assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)
+          with open("Cargo.toml", "rb") as f:
+              assert tomllib.load(f)["package"]["version"] == version
+          PY
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config dpkg-dev desktop-file-utils alsa-utils \
+            libasound2-dev libudev-dev libx11-dev libxi-dev libxcursor-dev \
+            libxrandr-dev libxinerama-dev libxkbcommon-dev libwayland-dev \
+            libgl1-mesa-dev libgtk-3-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Build and test native ARM64 application
+        run: |
+          cargo build --release --locked --target aarch64-unknown-linux-gnu
+          cargo test --release --locked --target aarch64-unknown-linux-gnu
+      - name: Save native test executable for hardware validation
+        run: |
+          cargo test --release --locked --target aarch64-unknown-linux-gnu \
+            --no-run --message-format=json > test-build.json
+          mkdir -p hardware-tests
+          python3 - <<'PY'
+          import json, shutil
+          from pathlib import Path
+          executables = [item["executable"] for line in Path("test-build.json").read_text().splitlines()
+                         if (item := json.loads(line)).get("reason") == "compiler-artifact"
+                         and item.get("profile", {}).get("test") and item.get("executable")]
+          assert len(executables) == 1, executables
+          shutil.copy2(executables[0], "hardware-tests/app-tests")
+          PY
+          tar -czf hardware-tests.tar.gz -C hardware-tests app-tests
+      - name: Package ARM64 application
+        run: |
+          bash build/package-linux-deb.sh --architecture arm64 \
+            --binary "target/aarch64-unknown-linux-gnu/release/transcribe-offline" \
+            --output-dir dist --target-dir target
+      - name: Verify package architecture and Vulkan-only dependency
+        run: |
+          set -euo pipefail
+          deb="dist/transcribe-offline_2.1.1_arm64.deb"
+          test "$(dpkg-deb -f "$deb" Package)" = "transcribe-offline"
+          test "$(dpkg-deb -f "$deb" Architecture)" = arm64
+          test "$(dpkg-deb -f "$deb" Version)" = "$VERSION"
+          depends="$(dpkg-deb -f "$deb" Depends)"
+          [[ "$depends" == *'openresearchtools-engine (>= 1.17)'* ]]
+          [[ "$depends" != *'cuda'* ]]
+          dpkg-deb -x "$deb" "${RUNNER_TEMP}/package-check"
+          readelf -h "${RUNNER_TEMP}/package-check/usr/lib/transcribe-offline/transcribe-offline" | grep 'Machine:.*AArch64'
+          desktop-file-validate "${RUNNER_TEMP}/package-check/usr/share/applications/transcribe-offline.desktop"
+          test ! -e "${RUNNER_TEMP}/package-check/opt/openresearchtools/engine"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-deb
+          path: dist/transcribe-offline_2.1.1_arm64.deb
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-hardware-tests
+          path: hardware-tests.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      SOURCE_TAG: ${{ inputs.carry_forward_release_tag }}
+      DRAFT: ${{ inputs.draft }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-arm64-deb
+          path: new-package
+      - name: Assemble release and verify retained checksums
+        run: |
+          python3 scripts/prepare_arm64_release.py \
+            --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --source "$SOURCE_TAG" \
+            --new-asset "new-package/transcribe-offline_2.1.1_arm64.deb" --output release-assets \
+            --retain "Transcribe-Offline-windows-x64.exe" \
+            --retain "transcribe-offline-macos-arm64.dmg" \
+            --retain "transcribe-offline_2.1.0_amd64.deb"
+      - name: Create release
+        run: |
+          set -euo pipefail
+          flags=()
+          if [[ "$DRAFT" == true ]]; then flags+=(--draft); else flags+=(--latest); fi
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "Transcribe Offline $RELEASE_TAG" \
+            --notes-file release-notes.md "${flags[@]}" release-assets/*

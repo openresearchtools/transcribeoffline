@@ -59,6 +59,10 @@ struct ManifestSources {
 
 #[cfg(target_os = "linux")]
 pub fn linux_system_runtime_dir_for_backend(backend: &str) -> Result<PathBuf> {
+    if cfg!(target_arch = "aarch64") {
+        // Migrate saved CUDA settings to the only supported ARM64 runtime.
+        return Ok(PathBuf::from(LINUX_VULKAN_RUNTIME_DIR));
+    }
     match backend.trim().to_ascii_lowercase().as_str() {
         "" | "vulkan" => Ok(PathBuf::from(LINUX_VULKAN_RUNTIME_DIR)),
         "cuda" => Ok(PathBuf::from(LINUX_CUDA_RUNTIME_DIR)),
@@ -151,6 +155,9 @@ pub fn install_or_repair_runtime_with_backend(
 
 #[cfg(target_os = "linux")]
 pub fn available_runtime_backends(_paths: &AppPaths) -> Result<Vec<String>> {
+    if cfg!(target_arch = "aarch64") {
+        return Ok(vec!["vulkan".to_string()]);
+    }
     Ok(vec!["vulkan".to_string(), "cuda".to_string()])
 }
 
@@ -243,8 +250,10 @@ fn current_platform_key() -> &'static str {
         "windows-x64"
     } else if cfg!(target_os = "macos") {
         "macos-arm64"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "linux-arm64"
     } else {
-        "ubuntu-x64"
+        "linux-x64"
     }
 }
 
@@ -741,9 +750,11 @@ mod tests {
         );
         assert_eq!(
             super::linux_system_runtime_dir_for_backend("CUDA").unwrap(),
-            std::path::PathBuf::from(super::LINUX_CUDA_RUNTIME_DIR)
+            std::path::PathBuf::from(if cfg!(target_arch = "aarch64") { super::LINUX_VULKAN_RUNTIME_DIR } else { super::LINUX_CUDA_RUNTIME_DIR })
         );
-        assert!(super::linux_system_runtime_dir_for_backend("metal").is_err());
+        if !cfg!(target_arch = "aarch64") {
+            assert!(super::linux_system_runtime_dir_for_backend("metal").is_err());
+        }
     }
 
     fn asset(platform: &str, backend: &str, id: &str) -> ManifestAsset {
@@ -803,5 +814,21 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].id, "linux-vulkan");
         assert_eq!(got[1].id, "linux-cpu");
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "aarch64"))]
+mod arm64_tests {
+    #[test]
+    fn bundled_manifest_selects_only_arm64_vulkan() {
+        let manifest: super::EngineManifest = serde_json::from_str(include_str!(
+            "../runtime-manifests/engine-manifest.json"
+        )).unwrap();
+        assert_eq!(super::current_platform_key(), "linux-arm64");
+        let assets = super::filtered_assets_for_platform(&manifest);
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].backend, "vulkan");
+        assert_eq!(assets[0].file_name, "engine-arm64.deb");
+        assert_eq!(assets[0].sha256, "7f2a9e4de287cbed4ac6f25e8c200f69bc58505c0dbba26e6c8b297a889fac27");
     }
 }

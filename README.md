@@ -257,3 +257,26 @@ BibTeX:
   license   = {MIT}
 }
 ```
+
+## Linux ARM64 Vulkan release
+
+Release 2.1.1 adds a native Linux ARM64 `.deb`. ARM64 always uses Vulkan,
+including when migrating saved CUDA settings, and has no CUDA runtime selector
+or CUDA package dependency. The package depends on `openresearchtools-engine
+(>= 1.17)`; APT selects and downloads the ARM64 engine automatically.
+
+The manual **Linux ARM64 Vulkan release** workflow builds and tests on
+`ubuntu-24.04-arm`. It copies the Windows x64, macOS ARM64 and Linux AMD64
+binaries unchanged from release `2.1`, verifies their GitHub SHA-256
+digests, and writes fresh `SHA256SUMS.txt`. Their embedded versions are retained.
+The default draft release allows hardware testing before publication.
+The `linux-arm64-hardware-tests` Actions artifact contains the native test
+executable for testing with an installed engine.
+
+Manual installation without the Open Research Tools APT repository:
+
+```sh
+wget https://github.com/openresearchtools/engine/releases/download/v1.17/engine-arm64.deb
+wget https://github.com/openresearchtools/transcribeoffline/releases/download/2.1.1/transcribe-offline_2.1.1_arm64.deb
+sudo apt install ./engine-arm64.deb ./transcribe-offline_2.1.1_arm64.deb
+```

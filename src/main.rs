@@ -1580,48 +1580,52 @@ impl UiApp {
             );
         }
         ui.label("Linux engine runtimes are installed and updated by APT; this app never downloads or modifies them.");
-        ui.label("Required packages: openresearchtools-engine and openresearchtools-engine-cuda");
+        ui.label(if cfg!(target_arch = "aarch64") { "Linux ARM64 uses Vulkan automatically. APT downloads openresearchtools-engine v1.17 or newer for ARM64." } else { "Required packages: openresearchtools-engine and openresearchtools-engine-cuda" });
 
-        let selected_text = self
-            .runtime_install_backends
-            .get(self.selected_runtime_install_backend)
-            .cloned()
-            .unwrap_or_else(|| "vulkan".to_string());
-        let mut selected_index = self
-            .selected_runtime_install_backend
-            .min(self.runtime_install_backends.len().saturating_sub(1));
-        ui.horizontal(|ui| {
-            ui.label("Linux engine backend:");
-            egui::ComboBox::from_id_salt("runtime_backend_linux_combo")
-                .selected_text(selected_text.to_ascii_uppercase())
-                .show_ui(ui, |ui| {
-                    for (idx, backend) in self.runtime_install_backends.iter().enumerate() {
-                        ui.selectable_value(&mut selected_index, idx, backend.to_ascii_uppercase());
-                    }
-                });
-        });
-
-        if selected_index != self.selected_runtime_install_backend {
-            self.selected_runtime_install_backend = selected_index;
-            if let Some(backend) = self
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        ui.label("Engine: Vulkan");
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let selected_text = self
                 .runtime_install_backends
                 .get(self.selected_runtime_install_backend)
                 .cloned()
-            {
-                self.settings.runtime_download_backend = backend.clone();
-                if let Ok(selected_dir) =
-                    runtime_installer::linux_system_runtime_dir_for_backend(&backend)
+                .unwrap_or_else(|| "vulkan".to_string());
+            let mut selected_index = self
+                .selected_runtime_install_backend
+                .min(self.runtime_install_backends.len().saturating_sub(1));
+            ui.horizontal(|ui| {
+                ui.label("Linux engine backend:");
+                egui::ComboBox::from_id_salt("runtime_backend_linux_combo")
+                    .selected_text(selected_text.to_ascii_uppercase())
+                    .show_ui(ui, |ui| {
+                        for (idx, backend) in self.runtime_install_backends.iter().enumerate() {
+                            ui.selectable_value(&mut selected_index, idx, backend.to_ascii_uppercase());
+                        }
+                    });
+            });
+
+            if selected_index != self.selected_runtime_install_backend {
+                self.selected_runtime_install_backend = selected_index;
+                if let Some(backend) = self
+                    .runtime_install_backends
+                    .get(self.selected_runtime_install_backend)
+                    .cloned()
                 {
-                    self.settings.runtime_dir = selected_dir.display().to_string();
-                    configure_runtime_dll_search(&selected_dir);
-                    self.runtime_missing = runtime_missing_messages(&selected_dir);
-                    self.queue_linux_device_probe(selected_dir);
+                    self.settings.runtime_download_backend = backend.clone();
+                    if let Ok(selected_dir) =
+                        runtime_installer::linux_system_runtime_dir_for_backend(&backend)
+                    {
+                        self.settings.runtime_dir = selected_dir.display().to_string();
+                        configure_runtime_dll_search(&selected_dir);
+                        self.runtime_missing = runtime_missing_messages(&selected_dir);
+                        self.queue_linux_device_probe(selected_dir);
+                    }
+                    self.runtime_post_install_prompt = false;
+                    self.queue_save();
                 }
-                self.runtime_post_install_prompt = false;
-                self.queue_save();
             }
         }
-
         let selected_runtime_dir = resolve_runtime_dir(Path::new(self.settings.runtime_dir.trim()));
         ui.label(format!(
             "Runtime directory: {}",
@@ -6687,6 +6691,9 @@ fn selected_gpu_index_from_settings(settings: &AppSettings) -> Option<i32> {
 }
 
 fn default_runtime_backends_for_platform() -> Vec<String> {
+    if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        return vec!["vulkan".to_string()];
+    }
     if cfg!(target_os = "windows") {
         return vec!["vulkan".to_string(), "cuda".to_string()];
     }
@@ -6785,7 +6792,7 @@ fn sync_runtime_backend_from_installed_runtime(
     #[cfg(target_os = "linux")]
     {
         let detected_backend =
-            if runtime_dir == Path::new(runtime_installer::LINUX_CUDA_RUNTIME_DIR) {
+            if !cfg!(target_arch = "aarch64") && runtime_dir == Path::new(runtime_installer::LINUX_CUDA_RUNTIME_DIR) {
                 "cuda"
             } else {
                 "vulkan"
@@ -8292,7 +8299,7 @@ mod tests {
     fn linux_runtime_options_and_roots_are_fixed_to_apt_packages() {
         assert_eq!(
             default_runtime_backends_for_platform(),
-            vec!["vulkan".to_string(), "cuda".to_string()]
+            if cfg!(target_arch = "aarch64") { vec!["vulkan".to_string()] } else { vec!["vulkan".to_string(), "cuda".to_string()] }
         );
         assert_eq!(
             resolve_runtime_dir(Path::new(runtime_installer::LINUX_VULKAN_RUNTIME_DIR)),
@@ -8300,7 +8307,7 @@ mod tests {
         );
         assert_eq!(
             resolve_runtime_dir(Path::new(runtime_installer::LINUX_CUDA_RUNTIME_DIR)),
-            PathBuf::from(runtime_installer::LINUX_CUDA_RUNTIME_DIR)
+            PathBuf::from(if cfg!(target_arch = "aarch64") { runtime_installer::LINUX_VULKAN_RUNTIME_DIR } else { runtime_installer::LINUX_CUDA_RUNTIME_DIR })
         );
         assert_eq!(
             resolve_runtime_dir(Path::new("/tmp/legacy-downloaded-engine")),
@@ -8346,13 +8353,14 @@ mod tests {
             return;
         };
         let runtime_backend = env::var("TRANSCRIBE_E2E_RUNTIME")
-            .unwrap_or_else(|_| "cuda".to_string())
+            .unwrap_or_else(|_| "vulkan".to_string())
             .to_ascii_lowercase();
         let (runtime_dir, gpu_index, expected_backend) = match runtime_backend.as_str() {
             "cuda" => (runtime_installer::LINUX_CUDA_RUNTIME_DIR, 0, "CUDA"),
-            "vulkan" => (runtime_installer::LINUX_VULKAN_RUNTIME_DIR, 1, "Vulkan"),
+            "vulkan" => (runtime_installer::LINUX_VULKAN_RUNTIME_DIR, 0, "Vulkan"),
             other => panic!("unsupported TRANSCRIBE_E2E_RUNTIME '{other}'"),
         };
+        let gpu_index = env::var("TRANSCRIBE_E2E_GPU").ok().map(|s| s.parse::<i32>().expect("GPU index")).unwrap_or(gpu_index);
         let mut settings = AppSettings::default();
         settings.runtime_dir = runtime_dir.to_string();
         settings.runtime_download_backend = runtime_backend;
@@ -8378,6 +8386,13 @@ mod tests {
             "unexpected transcript: {}",
             result.output_text
         );
+        if let Ok(reference) = env::var("TRANSCRIBE_E2E_REFERENCE") {
+            let normalize = |text: &str| text.split_whitespace()
+                .map(|word| word.chars().filter(|ch| ch.is_alphanumeric()).collect::<String>().to_lowercase())
+                .filter(|word| !word.is_empty()).collect::<Vec<_>>();
+            let expected = fs::read_to_string(reference).expect("reference transcript");
+            assert_eq!(normalize(&result.output_text), normalize(&expected));
+        }
         assert!(stages.iter().any(|stage| stage.contains(&format!(
             "running {expected_backend} Engine subprocess on GPU {gpu_index}"
         ))));
